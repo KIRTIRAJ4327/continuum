@@ -1,20 +1,28 @@
-.PHONY: help install verify run test clean services services-down services-logs
+.PHONY: help install install-ui verify verify-offline run run-dev ui-dev ui-build test clean services services-down services-logs
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
 	@echo ""
 	@echo "Commands:"
 	@echo "  make install        — Install Python dependencies"
+	@echo "  make install-ui     — Install React UI dependencies"
 	@echo "  make services       — Start Neo4j + Postgres (docker-compose, detached)"
 	@echo "  make services-down  — Stop the docker-compose services"
 	@echo "  make services-logs  — Tail docker-compose logs"
-	@echo "  make verify         — Run local verification (lint, type, test)"
-	@echo "  make run            — Start orchestrator (port 8000)"
+	@echo "  make verify         — Run full verification (lint, type, test, offline)"
+	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only"
+	@echo "  make run            — Build UI + start API (serves ui/dist at /)"
+	@echo "  make run-dev        — Start API only (use 'make ui-dev' in another terminal)"
+	@echo "  make ui-dev         — Start Vite dev server on :5173 (proxies API)"
+	@echo "  make ui-build       — Build React UI into ui/dist/"
 	@echo "  make test           — Run test suite"
-	@echo "  make clean          — Remove __pycache__, .pytest_cache"
+	@echo "  make clean          — Remove __pycache__, .pytest_cache, ui/dist"
 
 install:
 	pip install -r requirements.txt
+
+install-ui:
+	cd ui && npm install
 
 services:
 	docker-compose up -d neo4j postgres
@@ -25,7 +33,7 @@ services-down:
 services-logs:
 	docker-compose logs -f --tail=100
 
-verify:
+verify: verify-offline
 	@echo "Running lint..."
 	ruff check .
 	@echo "Running type check..."
@@ -34,13 +42,28 @@ verify:
 	pytest tests/ -v
 	@echo "✓ All checks passed"
 
-run:
+verify-offline:
+	@echo "Running offline verification (11/11 + 3/3)..."
+	python scripts/verify_agent_core.py
+	python scripts/verify_m0_loop.py
+
+ui-build:
+	cd ui && npm run build
+
+run: ui-build
+	python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+run-dev:
 	python -m uvicorn api.main:app --reload --port 8000
+
+ui-dev:
+	cd ui && npm run dev
 
 test:
 	pytest tests/ -v --cov=orchestrator --cov=agents
 
 clean:
-	find . -type d -name __pycache__ -exec rm -rf {} +
-	find . -type d -name .pytest_cache -exec rm -rf {} +
-	find . -type f -name "*.pyc" -delete
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	rm -rf ui/dist
