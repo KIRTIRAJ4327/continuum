@@ -1,25 +1,165 @@
-"""Emit database schema skill."""
-from typing import Dict, Any
+"""
+emit_schema skill — generates PostgreSQL DDL from story + spec.
+
+Live path:  Azure AI call for domain-accurate DDL.
+Offline path: Derives schema from story title + spec data_entities.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
 
 async def emit_schema(story: Dict[str, Any], spec: Dict[str, Any]) -> str:
     """
-    Generate a SQL DDL schema from the story and spec.
+    Generate a PostgreSQL DDL schema for the feature.
+
+    Args:
+        story: BSA story dict (title, description).
+        spec:  Detailed spec (data_entities, functional, …).
 
     Returns:
-        SQL DDL string
+        SQL DDL string (CREATE TABLE statements + indexes).
     """
-    # TODO: Call LLM to generate schema
-    return """
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    title = story.get("title", "Feature")
+    entities: List[str] = spec.get("data_entities") or []
+
+    # Try live LLM
+    llm_ddl = await _azure_llm(
+        prompt=(
+            f"Generate a PostgreSQL DDL schema for:\n\n"
+            f"Feature: {title}\n"
+            f"Data entities: {', '.join(entities[:6]) if entities else title}\n\n"
+            "Requirements:\n"
+            "- Use UUID primary keys (gen_random_uuid())\n"
+            "- Add created_at / updated_at TIMESTAMPTZ columns\n"
+            "- Add appropriate foreign key constraints\n"
+            "- Add indexes on foreign keys and commonly-queried columns\n"
+            "- Enable row-level security (ALTER TABLE ... ENABLE ROW LEVEL SECURITY)\n"
+            "Return ONLY the SQL DDL — no prose, no markdown fences."
+        ),
+        system=(
+            "You are a senior database architect. Generate production-grade PostgreSQL DDL. "
+            "Use best practices: UUIDs, timestamptz, RLS, proper indexes. "
+            "Return ONLY the SQL — no explanation."
+        ),
+    )
+    if llm_ddl and "CREATE TABLE" in llm_ddl.upper():
+        logger.info("[emit_schema] LLM schema generated for: %s", title)
+        return llm_ddl.strip()
+
+    return _build_schema(title, entities)
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic DDL builder
+# --------------------------------------------------------------------------- #
+def _table_name(entity: str) -> str:
+    """Convert entity name to snake_case table name (plural)."""
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", entity).lower()
+    snake = re.sub(r"[^a-z0-9_]", "_", snake).strip("_")
+    return snake + "s" if not snake.endswith("s") else snake
+
+
+def _build_schema(title: str, entities: List[str]) -> str:
+    """Build realistic DDL from title/entity list."""
+    if not entities:
+        # Derive primary table from title
+        words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()
+        stop = {"build", "create", "add", "a", "an", "the", "for", "with"}
+        candidates = [w for w in words if w not in stop and len(w) > 2]
+        entities = [candidates[-1].capitalize()] if candidates else ["Resource"]
+
+    tables: List[str] = []
+
+    # Always create users table (almost every feature needs it)
+    if not any("user" in e.lower() for e in entities):
+        entities = ["User"] + entities
+
+    for i, entity in enumerate(entities[:5]):
+        tbl = _table_name(entity)
+        col_name = entity.lower().replace(" ", "_")[:20]
+
+        fk_clause = ""
+        if i > 0 and "user" not in tbl:
+            user_tbl = _table_name(entities[0])
+            fk_clause = f"""    {_table_name(entities[0])[:-1]}_id UUID NOT NULL REFERENCES {user_tbl}(id) ON DELETE CASCADE,\n"""
+
+        tables.append(
+            f"""CREATE TABLE IF NOT EXISTS {tbl} (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+{fk_clause}    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    metadata JSONB DEFAULT '{{}}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE activities (
-    id SERIAL PRIMARY KEY,
-    user_id INT NOT NULL REFERENCES users(id),
-    action VARCHAR(255),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY;
+
+CREATE INDEX IF NOT EXISTS idx_{tbl}_status   ON {tbl}(status);
+CREATE INDEX IF NOT EXISTS idx_{tbl}_created  ON {tbl}(created_at DESC);
 """
+        )
+
+    # Updated-at trigger (shared)
+    trigger = """
+-- Auto-update updated_at on every row change
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+"""
+    for entity in entities[:5]:
+        tbl = _table_name(entity)
+        trigger += f"""
+CREATE OR REPLACE TRIGGER trg_{tbl}_updated_at
+    BEFORE UPDATE ON {tbl}
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+"""
+
+    header = f"-- DDL for: {title}\n-- Generated by Continuum emit_schema skill\n\n"
+    return header + "\n".join(tables) + trigger
+
+
+# --------------------------------------------------------------------------- #
+# Azure AI helper
+# --------------------------------------------------------------------------- #
+async def _azure_llm(prompt: str, system: str = "") -> Optional[str]:
+    api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
+    endpoint = (
+        os.getenv("AZURE_AI_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
+    ).rstrip("/")
+    deployment = (
+        os.getenv("AZURE_DEPLOYMENT_STRONG") or os.getenv("AZURE_DEPLOYMENT_ID") or ""
+    )
+    if not (api_key and endpoint and deployment):
+        return None
+    try:
+        from langchain_azure_ai.chat_models import AzureChatCompletions  # type: ignore
+        from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore
+
+        model = AzureChatCompletions(
+            azure_endpoint=endpoint,
+            azure_deployment=deployment,
+            api_key=api_key,
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+            max_tokens=2048,
+        )
+        msgs = (
+            ([SystemMessage(content=system)] if system else [])
+            + [HumanMessage(content=prompt)]
+        )
+        resp = await model.ainvoke(msgs)
+        return getattr(resp, "content", None)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[emit_schema] LLM call skipped: %s", exc)
+        return None
