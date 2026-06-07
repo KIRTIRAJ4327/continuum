@@ -149,6 +149,125 @@ def _classify(state: ContinuumState) -> str:
     return "running"
 
 
+@app.post("/run/{run_id}/resume")
+async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
+    """
+    Resume a run that is suspended at a human_gate interrupt().
+
+    This endpoint is called by an operator after reviewing the artifacts surfaced
+    by GET /run/{run_id}. Pass ?approved=true to unblock the gate and continue,
+    or ?approved=false to reject (leaves the run in 'escalated' state).
+
+    For M0/offline runs (no LangGraph checkpointer) the state is mutated
+    directly in-memory so that the response reflects the decision.
+    """
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    if not state.human_approval_pending:
+        raise HTTPException(status_code=409, detail="run is not waiting for human approval")
+
+    gate_name = state.approval_gate_name or ""
+
+    if not approved:
+        # Rejection — leave the run escalated; no further processing
+        logger.info("[RESUME] Run %s gate '%s' rejected by operator", run_id, gate_name)
+        return {"run_id": run_id, "status": "escalated", "state": _state_to_dict(state)}
+
+    # Approval — update the relevant flag and continue the pipeline
+    logger.info("[RESUME] Run %s gate '%s' approved by operator", run_id, gate_name)
+    if gate_name == "story_review":
+        state.story_approved = True
+    elif gate_name == "design_review":
+        state.design_approved = True
+    elif gate_name == "merge_review":
+        state.merge_approved = True
+    else:
+        # Gate-failure retry (e.g., local_verify escalated after 3 fails)
+        gate = _gate(state, gate_name)
+        if gate:
+            gate.retry_count = 0
+            gate.status = "pending"
+
+    state.human_approval_pending = False
+    state.approval_gate_name = None
+
+    # Re-run the remaining pipeline stages
+    try:
+        ctx = AgentContext.from_env()
+
+        if gate_name == "story_review":
+            # Story approved — run the rest of the pipeline from Architect onwards
+            for role in ("architect", "planner"):
+                await run_agent(state, role, ctx)
+            for _ in range(_MAX_RETRIES + 1):
+                await run_agent(state, "developer", ctx)
+                gv = _gate(state, "local_verify")
+                if gv is None or gv.status == "green":
+                    break
+                if gv.retry_count >= _MAX_RETRIES:
+                    state.human_approval_pending = True
+                    state.approval_gate_name = "local_verify"
+                    break
+                gv.retry_count += 1
+            if not state.human_approval_pending:
+                lv = _gate(state, "local_verify")
+                if lv and lv.status == "green":
+                    await run_agent(state, "security", ctx)
+                    state.human_approval_pending = True
+                    state.approval_gate_name = "merge_review"
+
+        elif gate_name == "design_review":
+            # Design approved — run Planner → Developer → Security
+            await run_agent(state, "planner", ctx)
+            for _ in range(_MAX_RETRIES + 1):
+                await run_agent(state, "developer", ctx)
+                gv = _gate(state, "local_verify")
+                if gv is None or gv.status == "green":
+                    break
+                if gv.retry_count >= _MAX_RETRIES:
+                    state.human_approval_pending = True
+                    state.approval_gate_name = "local_verify"
+                    break
+                gv.retry_count += 1
+            if not state.human_approval_pending:
+                lv = _gate(state, "local_verify")
+                if lv and lv.status == "green":
+                    await run_agent(state, "security", ctx)
+                    state.human_approval_pending = True
+                    state.approval_gate_name = "merge_review"
+
+        elif gate_name == "merge_review":
+            # Merge approved — finalise run
+            state.completed_at = time.time()
+
+        else:
+            # Gate-failure retry — re-run developer
+            for _ in range(_MAX_RETRIES + 1):
+                await run_agent(state, "developer", ctx)
+                gv = _gate(state, gate_name)
+                if gv is None or gv.status == "green":
+                    break
+                if gv.retry_count >= _MAX_RETRIES:
+                    state.human_approval_pending = True
+                    state.approval_gate_name = gate_name
+                    break
+                gv.retry_count += 1
+            if not state.human_approval_pending:
+                lv = _gate(state, "local_verify")
+                if lv and lv.status == "green":
+                    await run_agent(state, "security", ctx)
+
+        if not state.completed_at and not state.human_approval_pending:
+            state.completed_at = time.time()
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Resume pipeline failed for run %s", run_id)
+        state.error_message = str(exc)
+
+    return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}
+
+
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
