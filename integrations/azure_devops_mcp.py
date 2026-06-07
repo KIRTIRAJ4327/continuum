@@ -1,364 +1,312 @@
 """
-Azure DevOps REST API client — used by Continuum skills that need to interact
-with ADO work items, repositories, and pull requests.
+Azure DevOps REST API v7.1 client for Continuum.
 
-Credential priority:
-  1. Explicit `token` arg to the constructor (for skills that inject ado_token).
+Credential priority (highest to lowest):
+  1. Explicit ``token`` kwarg to ``from_env()`` (injected via AgentContext).
   2. AZURE_DEVOPS_TOKEN environment variable.
   3. AZURE_DEVOPS_PAT environment variable (legacy alias).
 
-If no token is available, every method returns a stub dict with "stub": True
-so the offline path stays clean and testable.
+If the minimum required vars (token + org + project) are absent every method
+returns a stub dict with ``"stub": True`` so the offline/test path stays clean
+and never crashes.
+
+Usage:
+    from integrations.azure_devops_mcp import get_ado_client
+    client = get_ado_client()
+    pr = await client.create_pull_request(...)
 """
 from __future__ import annotations
 
-import json
+import base64
+import hashlib
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
 _API_VERSION = "7.1"
 
+# ── Module-level singleton ─────────────────────────────────────────────────────
+_client_singleton: Optional["AzureDevOpsClient"] = None
+
+
+def get_ado_client(token: str = "") -> "AzureDevOpsClient":
+    """Return (or create) a module-level ADO client reused across calls."""
+    global _client_singleton
+    if _client_singleton is None:
+        _client_singleton = AzureDevOpsClient.from_env(token=token)
+    return _client_singleton
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _stub_id(seed: str) -> int:
+    """Deterministic stub integer ID for offline mode (MD5-keyed)."""
+    return int(hashlib.md5(seed.encode()).hexdigest()[:8], 16)  # noqa: S324
+
+
+def _b64_auth(token: str) -> str:
+    return base64.b64encode(f":{token}".encode()).decode()
+
 
 class AzureDevOpsClient:
     """
-    Thin async wrapper around the Azure DevOps REST API v7.1.
+    Thin async wrapper around Azure DevOps REST API v7.1.
 
-    Usage:
-        client = AzureDevOpsClient.from_env()
-        item   = await client.create_work_item("User Story", "My feature", "Description")
-        pr     = await client.create_pull_request("feature/x", "main", "My PR", "Body")
-        status = await client.get_pull_request_status(pr["id"])
+    Every method is safe to call without live credentials: it returns a stub
+    dict with ``"stub": True`` when the client is not ready (no token / org).
     """
 
     def __init__(self, org_url: str, project: str, token: str):
-        self.org_url  = org_url.rstrip("/")
-        self.project  = project
-        self._token   = token
-        self._base    = f"{self.org_url}/{project}/_apis"
-        self._git_base = f"{self.org_url}/{project}/_apis/git"
+        self.org_url = org_url.rstrip("/")
+        self.project = project
+        self.token = token
 
-    # ------------------------------------------------------------------ #
-    # Factory
-    # ------------------------------------------------------------------ #
     @classmethod
     def from_env(cls, token: str = "") -> "AzureDevOpsClient":
         """Build a client from environment variables."""
-        org  = os.getenv("AZURE_DEVOPS_ORG", "")
-        proj = os.getenv("AZURE_DEVOPS_PROJECT", "")
-        tok  = (
+        _token = (
             token
             or os.getenv("AZURE_DEVOPS_TOKEN", "")
             or os.getenv("AZURE_DEVOPS_PAT", "")
         )
-        if not org:
-            logger.debug("[ADO] AZURE_DEVOPS_ORG not set; ADO calls will be stubs")
-        base_url = f"https://dev.azure.com/{org}" if org else ""
-        return cls(base_url, proj, tok)
+        _org = (
+            os.getenv("AZURE_DEVOPS_ORG_URL", "")
+            or os.getenv("AZURE_DEVOPS_ORG", "")
+        ).rstrip("/")
+        _project = os.getenv("AZURE_DEVOPS_PROJECT", "")
+        return cls(org_url=_org, project=_project, token=_token)
 
-    # ------------------------------------------------------------------ #
-    # Work items
-    # ------------------------------------------------------------------ #
+    # ── Internal helpers ───────────────────────────────────────────────────────
+    def _ready(self) -> bool:
+        return bool(self.token and self.org_url and self.project)
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Basic {_b64_auth(self.token)}",
+            "Content-Type":  "application/json",
+            "Accept":        "application/json",
+        }
+
+    def _patch_headers(self) -> Dict[str, str]:
+        h = self._headers()
+        h["Content-Type"] = "application/json-patch+json"
+        return h
+
+    async def _http(self) -> Any:
+        """Lazy-import httpx.AsyncClient factory. Raises if httpx missing."""
+        try:
+            import httpx  # type: ignore[import]
+            return httpx.AsyncClient(timeout=30)
+        except ImportError as exc:
+            raise RuntimeError(
+                "httpx is required for live ADO calls: pip install httpx"
+            ) from exc
+
+    # ── Work Items ─────────────────────────────────────────────────────────────
     async def create_work_item(
         self,
         work_item_type: str,
         title: str,
-        description: str,
-        tags: str = "continuum;auto-generated",
-        area_path: str = "",
+        description: str = "",
+        tags: str = "continuum",
     ) -> Dict[str, Any]:
         """
-        Create a work item (User Story, Bug, Task, …) in ADO.
+        Create an ADO work item (e.g. ``User Story``, ``Task``, ``Bug``).
 
-        Returns:
-            {"id": int, "url": str, "title": str, "type": str, "stub": bool}
+        Returns ``{"id": int, "url": str, "title": str, "stub": bool}``.
         """
         if not self._ready():
-            return self._stub_wi(work_item_type, title)
+            sid = _stub_id(f"{work_item_type}-{title}-{time.time()}")
+            logger.info("[ADO] offline stub — create_work_item type=%r title=%r", work_item_type, title)
+            return {
+                "id":    sid,
+                "url":   f"https://dev.azure.com/stub/work-items/{sid}",
+                "title": title,
+                "stub":  True,
+            }
 
-        encoded_type = work_item_type.replace(" ", "%20")
-        url = f"{self._base}/wit/workitems/${encoded_type}?api-version={_API_VERSION}"
-
-        patch: List[Dict[str, Any]] = [
+        wi_type_enc = quote(work_item_type)
+        url = (
+            f"{self.org_url}/{self.project}/_apis/wit/workitems"
+            f"/${wi_type_enc}?api-version={_API_VERSION}"
+        )
+        body = [
             {"op": "add", "path": "/fields/System.Title",       "value": title},
             {"op": "add", "path": "/fields/System.Description", "value": description},
-            {"op": "add", "path": "/fields/System.Tags",        "value": tags},
+            {"op": "add", "path": "/fields/System.Tags",         "value": tags},
         ]
-        if area_path:
-            patch.append({"op": "add", "path": "/fields/System.AreaPath", "value": area_path})
+        async with await self._http() as client:
+            resp = await client.post(url, headers=self._patch_headers(), json=body)
+            resp.raise_for_status()
+            data = resp.json()
 
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    url,
-                    content=json.dumps(patch),
-                    headers={
-                        "Content-Type": "application/json-patch+json",
-                        "Accept": "application/json",
-                    },
-                    auth=("", self._token),
-                )
-            if resp.status_code in (200, 201):
-                data = resp.json()
-                wi_id = data["id"]
-                html  = (
-                    data.get("_links", {}).get("html", {}).get("href")
-                    or f"{self.org_url}/{self.project}/_workitems/edit/{wi_id}"
-                )
-                logger.info("[ADO] Work item created: %s #%s", work_item_type, wi_id)
-                return {"id": wi_id, "url": html, "title": title, "type": work_item_type, "stub": False}
-
-            logger.warning("[ADO] create_work_item HTTP %d: %s", resp.status_code, resp.text[:200])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] create_work_item failed: %s", exc)
-
-        return self._stub_wi(work_item_type, title)
+        return {
+            "id":    data["id"],
+            "url":   data.get("url", ""),
+            "title": data["fields"].get("System.Title", title),
+            "stub":  False,
+        }
 
     async def update_work_item(
-        self, item_id: int, state_value: str = "Active", comment: str = ""
+        self, item_id: int, state: str, comment: str = ""
     ) -> Dict[str, Any]:
-        """Update the state of an existing work item."""
+        """Update a work item's state (e.g. ``Active`` → ``Resolved``)."""
         if not self._ready():
-            return {"id": item_id, "state": state_value, "stub": True}
+            return {"id": item_id, "state": state, "stub": True}
 
-        url = f"{self._base}/wit/workitems/{item_id}?api-version={_API_VERSION}"
-        patch: List[Dict[str, Any]] = [
-            {"op": "add", "path": "/fields/System.State", "value": state_value},
+        url = (
+            f"{self.org_url}/{self.project}/_apis/wit/workitems"
+            f"/{item_id}?api-version={_API_VERSION}"
+        )
+        body: List[Dict[str, Any]] = [
+            {"op": "add", "path": "/fields/System.State", "value": state},
         ]
         if comment:
-            patch.append({"op": "add", "path": "/fields/System.History", "value": comment})
+            body.append({"op": "add", "path": "/fields/System.History", "value": comment})
 
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.patch(
-                    url,
-                    content=json.dumps(patch),
-                    headers={
-                        "Content-Type": "application/json-patch+json",
-                        "Accept": "application/json",
-                    },
-                    auth=("", self._token),
-                )
-            if resp.status_code == 200:
-                return {"id": item_id, "state": state_value, "stub": False}
-            logger.warning("[ADO] update_work_item HTTP %d", resp.status_code)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] update_work_item failed: %s", exc)
+        async with await self._http() as client:
+            resp = await client.patch(url, headers=self._patch_headers(), json=body)
+            resp.raise_for_status()
+            data = resp.json()
 
-        return {"id": item_id, "state": state_value, "stub": True}
+        return {"id": data["id"], "state": state, "stub": False}
 
-    # ------------------------------------------------------------------ #
-    # Pull requests
-    # ------------------------------------------------------------------ #
+    # ── Pull Requests ──────────────────────────────────────────────────────────
     async def create_pull_request(
         self,
         source_branch: str,
         target_branch: str,
         title: str,
-        description: str,
-        repository: str = "",
-        auto_complete: bool = False,
+        description: str = "",
         work_item_ids: Optional[List[int]] = None,
+        repo: str = "",
     ) -> Dict[str, Any]:
         """
-        Open a pull request in the default (or named) ADO git repository.
+        Create a PR from ``source_branch`` → ``target_branch``.
 
-        Returns:
-            {"id": int, "url": str, "title": str, "status": str, "stub": bool}
+        Returns ``{"id": int, "url": str, "status": str, "stub": bool}``.
         """
         if not self._ready():
-            return self._stub_pr(title)
+            sid = _stub_id(f"pr-{source_branch}-{target_branch}-{time.time()}")
+            logger.info("[ADO] offline stub — create_pull_request %r → %r", source_branch, target_branch)
+            return {
+                "id":     sid,
+                "url":    f"https://dev.azure.com/stub/pullrequest/{sid}",
+                "status": "active",
+                "stub":   True,
+            }
 
-        repo = repository or os.getenv("AZURE_DEVOPS_REPO", "")
-        if not repo:
-            logger.warning("[ADO] AZURE_DEVOPS_REPO not set; cannot create PR")
-            return self._stub_pr(title)
-
-        url = f"{self._git_base}/repositories/{repo}/pullrequests?api-version={_API_VERSION}"
-        body: Dict[str, Any] = {
-            "title": title,
-            "description": description,
-            "sourceRefName": _ref(source_branch),
-            "targetRefName": _ref(target_branch),
-        }
-        if auto_complete:
-            body["completionOptions"] = {"mergeStrategy": "squash"}
-        if work_item_ids:
-            body["workItemRefs"] = [{"id": str(i)} for i in work_item_ids]
-
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    url,
-                    content=json.dumps(body),
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
-                    auth=("", self._token),
-                )
-            if resp.status_code in (200, 201):
-                data = resp.json()
-                pr_id = data["pullRequestId"]
-                pr_url = (
-                    f"{self.org_url}/{self.project}/_git/{repo}/pullrequest/{pr_id}"
-                )
-                logger.info("[ADO] PR created: #%s '%s'", pr_id, title)
-                return {"id": pr_id, "url": pr_url, "title": title, "status": "active", "stub": False}
-
-            logger.warning("[ADO] create_pull_request HTTP %d: %s", resp.status_code, resp.text[:200])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] create_pull_request failed: %s", exc)
-
-        return self._stub_pr(title)
-
-    async def get_pull_request_status(self, pr_id: int, repository: str = "") -> str:
-        """
-        Get the current status of a PR.
-
-        Returns one of: "draft", "active", "abandoned", "completed".
-        """
-        if not self._ready():
-            return "active"  # optimistic stub
-
-        repo = repository or os.getenv("AZURE_DEVOPS_REPO", "")
-        if not repo:
-            return "active"
-
-        url = f"{self._git_base}/repositories/{repo}/pullrequests/{pr_id}?api-version={_API_VERSION}"
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, auth=("", self._token))
-            if resp.status_code == 200:
-                status_map = {1: "active", 2: "abandoned", 3: "completed"}
-                raw_status = resp.json().get("status", 1)
-                return status_map.get(raw_status, "active")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] get_pull_request_status failed: %s", exc)
-        return "active"
-
-    async def approve_pull_request(self, pr_id: int, repository: str = "") -> bool:
-        """
-        Vote 'approve' (vote=10) on a PR as the authenticated user.
-
-        Returns True on success.
-        """
-        if not self._ready():
-            return False
-
-        repo = repository or os.getenv("AZURE_DEVOPS_REPO", "")
-        if not repo:
-            return False
-
-        # Get the current user's descriptor first
-        me_url = f"{self.org_url.replace('dev.azure.com', 'vssps.dev.azure.com')}/_apis/profile/profiles/me?api-version={_API_VERSION}"
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                me_resp = await client.get(me_url, auth=("", self._token))
-                if me_resp.status_code != 200:
-                    return False
-                reviewer_id = me_resp.json().get("id", "")
-
-                vote_url = (
-                    f"{self._git_base}/repositories/{repo}/pullrequests/{pr_id}"
-                    f"/reviewers/{reviewer_id}?api-version={_API_VERSION}"
-                )
-                vote_resp = await client.put(
-                    vote_url,
-                    content=json.dumps({"vote": 10}),  # 10 = approve
-                    headers={"Content-Type": "application/json"},
-                    auth=("", self._token),
-                )
-                return vote_resp.status_code in (200, 201)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] approve_pull_request failed: %s", exc)
-        return False
-
-    async def add_pr_comment(
-        self, pr_id: int, comment: str, repository: str = ""
-    ) -> bool:
-        """Post a top-level comment on a pull request."""
-        if not self._ready():
-            return False
-
-        repo = repository or os.getenv("AZURE_DEVOPS_REPO", "")
-        if not repo:
-            return False
+        _repo = repo or os.getenv("AZURE_DEVOPS_REPO", "")
+        if not _repo:
+            logger.warning("[ADO] AZURE_DEVOPS_REPO not set — returning PR stub")
+            return {"id": 0, "url": "", "status": "active", "stub": True}
 
         url = (
-            f"{self._git_base}/repositories/{repo}/pullrequests/{pr_id}"
-            f"/threads?api-version={_API_VERSION}"
+            f"{self.org_url}/{self.project}/_apis/git/repositories"
+            f"/{_repo}/pullrequests?api-version={_API_VERSION}"
         )
-        body = {"comments": [{"parentCommentId": 0, "content": comment, "commentType": 1}], "status": 1}
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    url,
-                    content=json.dumps(body),
-                    headers={"Content-Type": "application/json"},
-                    auth=("", self._token),
-                )
-            return resp.status_code in (200, 201)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ADO] add_pr_comment failed: %s", exc)
-        return False
-
-    # ------------------------------------------------------------------ #
-    # Internals
-    # ------------------------------------------------------------------ #
-    def _ready(self) -> bool:
-        """True if enough config is present to attempt a real ADO call."""
-        return bool(self._token and self.org_url and self.project)
-
-    @staticmethod
-    def _stub_wi(work_item_type: str, title: str) -> Dict[str, Any]:
-        import hashlib
-        h = hashlib.md5(title.encode()).hexdigest()[:6].upper()
-        return {
-            "id": int(h, 16) % 10_000 or 1,
-            "url": f"https://example.com/workitems/{h}",
-            "title": title,
-            "type": work_item_type,
-            "stub": True,
+        body: Dict[str, Any] = {
+            "sourceRefName": f"refs/heads/{source_branch}",
+            "targetRefName": f"refs/heads/{target_branch}",
+            "title":         title,
+            "description":   description,
         }
+        if work_item_ids:
+            body["workItemRefs"] = [{"id": str(w)} for w in work_item_ids]
 
-    @staticmethod
-    def _stub_pr(title: str) -> Dict[str, Any]:
-        import hashlib
-        h = hashlib.md5(title.encode()).hexdigest()[:6].upper()
-        return {
-            "id": int(h, 16) % 10_000 or 1,
-            "url": f"https://example.com/pullrequest/{h}",
-            "title": title,
-            "status": "active",
-            "stub": True,
+        async with await self._http() as client:
+            resp = await client.post(url, headers=self._headers(), json=body)
+            resp.raise_for_status()
+            data = resp.json()
+
+        pr_id = data["pullRequestId"]
+        pr_url = f"{self.org_url}/{self.project}/_git/{_repo}/pullrequest/{pr_id}"
+        return {"id": pr_id, "url": pr_url, "status": "active", "stub": False}
+
+    async def get_pull_request_status(self, pr_id: int, repo: str = "") -> str:
+        """Return PR status: ``active``, ``abandoned``, or ``completed``."""
+        if not self._ready():
+            return "active"
+
+        _repo = repo or os.getenv("AZURE_DEVOPS_REPO", "")
+        if not _repo:
+            return "active"
+
+        url = (
+            f"{self.org_url}/{self.project}/_apis/git/repositories"
+            f"/{_repo}/pullrequests/{pr_id}?api-version={_API_VERSION}"
+        )
+        async with await self._http() as client:
+            resp = await client.get(url, headers=self._headers())
+            resp.raise_for_status()
+            data = resp.json()
+
+        return {1: "active", 2: "abandoned", 3: "completed"}.get(data.get("status", 1), "active")
+
+    async def approve_pull_request(self, pr_id: int, repo: str = "") -> bool:
+        """Vote to approve a PR (vote=10). Returns True on success."""
+        if not self._ready():
+            logger.info("[ADO] offline stub — approve_pull_request(%d)", pr_id)
+            return False
+
+        _repo = repo or os.getenv("AZURE_DEVOPS_REPO", "")
+        if not _repo:
+            return False
+
+        # Resolve the authenticated user's descriptor first
+        async with await self._http() as client:
+            me_resp = await client.get(
+                f"{self.org_url}/_apis/connectionData?api-version={_API_VERSION}",
+                headers=self._headers(),
+            )
+            me_resp.raise_for_status()
+            reviewer_id = (
+                me_resp.json()
+                .get("authenticatedUser", {})
+                .get("subjectDescriptor", "")
+            )
+
+        if not reviewer_id:
+            logger.warning("[ADO] Could not resolve reviewer descriptor — skipping vote")
+            return False
+
+        vote_url = (
+            f"{self.org_url}/{self.project}/_apis/git/repositories"
+            f"/{_repo}/pullrequests/{pr_id}/reviewers/{reviewer_id}"
+            f"?api-version={_API_VERSION}"
+        )
+        async with await self._http() as client:
+            resp = await client.put(
+                vote_url,
+                headers=self._headers(),
+                json={"vote": 10, "isRequired": False},
+            )
+            resp.raise_for_status()
+
+        return True
+
+    async def add_pr_comment(
+        self, pr_id: int, comment: str, repo: str = ""
+    ) -> Dict[str, Any]:
+        """Add a comment thread to a PR."""
+        if not self._ready():
+            return {"stub": True}
+
+        _repo = repo or os.getenv("AZURE_DEVOPS_REPO", "")
+        if not _repo:
+            return {"stub": True}
+
+        url = (
+            f"{self.org_url}/{self.project}/_apis/git/repositories"
+            f"/{_repo}/pullrequests/{pr_id}/threads?api-version={_API_VERSION}"
+        )
+        body = {
+            "comments": [{"parentCommentId": 0, "content": comment, "commentType": 1}]
         }
-
-
-# --------------------------------------------------------------------------- #
-# Convenience singleton accessor for skills
-# --------------------------------------------------------------------------- #
-_client: Optional[AzureDevOpsClient] = None
-
-
-def get_ado_client(token: str = "") -> AzureDevOpsClient:
-    """Return a module-level ADO client (one per process)."""
-    global _client
-    if _client is None or token:
-        _client = AzureDevOpsClient.from_env(token)
-    return _client
-
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-def _ref(branch: str) -> str:
-    """Normalise a branch name to a full git ref."""
-    if branch.startswith("refs/"):
-        return branch
-    return f"refs/heads/{branch}"
+        async with await self._http() as client:
+            resp = await client.post(url, headers=self._headers(), json=body)
+            resp.raise_for_status()
+            return {**resp.json(), "stub": False}
