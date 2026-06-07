@@ -76,9 +76,27 @@ class AgentContext:
 
     @classmethod
     def from_env(cls) -> "AgentContext":
-        """Build a context from environment variables (best-effort, no I/O)."""
-        ado = os.getenv("AZURE_DEVOPS_TOKEN", "")
+        """
+        Build a context from environment variables (best-effort, no I/O).
+
+        Neo4j driver is only created when NEO4J_URI or NEO4J_PASSWORD is set;
+        otherwise it stays None so skill fallback paths are used.
+        """
+        ado = (
+            os.getenv("AZURE_DEVOPS_TOKEN", "")
+            or os.getenv("AZURE_DEVOPS_PAT", "")
+        )
+        # Lazy-load Neo4j driver from config module to avoid circular imports
+        neo4j_driver = None
+        try:
+            from config import get_neo4j_driver, NEO4J_CONFIGURED  # type: ignore
+            if NEO4J_CONFIGURED:
+                neo4j_driver = get_neo4j_driver()
+        except Exception:  # noqa: BLE001
+            pass  # config module not yet initialized or neo4j not installed
+
         return cls(
+            neo4j_driver=neo4j_driver,
             repo_path=os.getenv("REPO_PATH", "."),
             tokens={"jira_token": ado, "ado_token": ado, "auth_token": ado},
             run_id=os.getenv("CONTINUUM_RUN_ID", ""),

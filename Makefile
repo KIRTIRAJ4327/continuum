@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline run run-dev ui-dev ui-build test clean services services-down services-logs
+.PHONY: help install install-ui verify verify-offline check-env run run-dev ui-dev ui-build test clean services services-down services-logs
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -6,6 +6,7 @@ help:
 	@echo "Commands:"
 	@echo "  make install        — Install Python dependencies"
 	@echo "  make install-ui     — Install React UI dependencies"
+	@echo "  make check-env      — Show which env vars are set (live vs offline)"
 	@echo "  make services       — Start Neo4j + Postgres (docker-compose, detached)"
 	@echo "  make services-down  — Stop the docker-compose services"
 	@echo "  make services-logs  — Tail docker-compose logs"
@@ -23,6 +24,21 @@ install:
 
 install-ui:
 	cd ui && npm install
+
+check-env:
+	@echo "Checking Continuum environment variables..."
+	@python -c "\
+import os; \
+live = [v for v in ['AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT','AZURE_DEPLOYMENT_STRONG','AZURE_DEVOPS_TOKEN','AZURE_DEVOPS_ORG','AZURE_DEVOPS_PROJECT','NEO4J_URI','NEO4J_PASSWORD','POSTGRES_URI'] if os.getenv(v)]; \
+missing = [v for v in ['AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT','AZURE_DEPLOYMENT_STRONG','AZURE_DEVOPS_TOKEN','AZURE_DEVOPS_ORG','AZURE_DEVOPS_PROJECT'] if not os.getenv(v)]; \
+print('  Set   :', ', '.join(live) if live else '(none)'); \
+print('  Unset :', ', '.join(missing) if missing else '(none)'); \
+print(); \
+print('  Azure AI:', 'LIVE' if os.getenv('AZURE_OPENAI_API_KEY') else 'offline (stub)'); \
+print('  ADO:     ', 'LIVE' if os.getenv('AZURE_DEVOPS_TOKEN') else 'offline (stub)'); \
+print('  Neo4j:   ', 'configured' if os.getenv('NEO4J_URI') else 'docker-compose default'); \
+print('  Postgres:', 'configured' if os.getenv('POSTGRES_URI') else 'docker-compose default'); \
+"
 
 services:
 	docker-compose up -d neo4j postgres
