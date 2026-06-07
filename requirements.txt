@@ -1,0 +1,45 @@
+# Core orchestration
+langgraph==0.0.27
+langchain==0.1.20
+langchain-azure-ai==0.1.0
+langchain-openai==0.0.14
+
+# Azure SDKs
+azure-identity==1.15.0
+azure-storage-blob==12.19.0
+azure-data-tables==12.15.0
+
+# Graph database
+neo4j==5.15.0
+neo4j-agent-memory==0.1.0
+
+# Web framework
+fastapi==0.104.0
+uvicorn==0.24.0
+pydantic==2.5.0
+
+# Database
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+
+# AI / evals
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-exporter-azure-monitor==1.1.1
+langsmith==0.1.0
+
+# Testing
+pytest==7.4.0
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Utilities
+python-dotenv==1.0.0
+pyyaml==6.0.1
+httpx==0.25.1
+aiofiles==23.2.1
+
+# Linting / formatting
+ruff==0.1.8
+mypy==1.7.0
+black==23.12.0

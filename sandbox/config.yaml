@@ -1,0 +1,20 @@
+session_pool:
+  endpoint: ${ACA_SESSION_POOL_ENDPOINT}
+  auth_token: ${ACA_AUTH_TOKEN}
+
+isolation:
+  level: "hyper-v"
+  memory_mb: 512
+  cpu_cores: 1
+  timeout_seconds: 300
+
+egress:
+  allowed_domains:
+    - api.github.com
+    - registry.npmjs.org
+    - pypi.org
+  deny_by_default: true
+
+logging:
+  enabled: true
+  level: "debug"

@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Local runtime data (docker volumes mounted here would be a foot-gun)
+neo4j_data/
+postgres_data/
+
+# Build artifacts
+dist/
+build/
+.coverage
+htmlcov/
+

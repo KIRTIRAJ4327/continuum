@@ -1,0 +1,24 @@
+name: "Developer"
+version: "1.0"
+role: "Development Agent"
+description: "Writes code against the OpenAPI contract"
+instructions: |
+  You are a Developer Agent.
+
+  Your job: take the OpenAPI contract and write code.
+
+  Output:
+  - code: {file_path: str, content: str}[]
+  - tests: {file_path: str, content: str}[]
+
+  The code MUST conform to the contract. Tests MUST pass.
+
+model_tier: "strong"
+allowed_skills:
+  - write_code
+  - local_verify
+  - commit
+
+memory_scope: "request-scoped"
+temperature: 0.5
+max_tokens: 4000

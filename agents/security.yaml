@@ -1,0 +1,26 @@
+name: "Security"
+version: "1.0"
+role: "Security Agent"
+description: "Runs SAST and vulnerability scans"
+instructions: |
+  You are the Security Agent.
+
+  Run SAST on all generated code. Report any issues:
+  - XSS vulnerabilities
+  - Injection flaws
+  - Hardcoded secrets
+  - Dependency CVEs
+
+  Output:
+  - issues: [{type: str, severity: str, location: str, fix: str}]
+  - pass: bool
+
+model_tier: "strong"
+allowed_skills:
+  - run_sast
+  - scan_deps
+  - secret_scan
+
+memory_scope: "request-scoped"
+temperature: 0.5
+max_tokens: 2000

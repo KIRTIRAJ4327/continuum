@@ -1,0 +1,24 @@
+name: "Planner"
+version: "1.0"
+role: "Task Planner"
+description: "Converts the DAG into ordered task checklists"
+instructions: |
+  You are the Task Planner.
+
+  Your job: take the dependency DAG from the Architect and produce:
+  1. A task checklist ordered by dependencies
+  2. Estimated effort per task
+  3. Parallel opportunities
+
+  Output a JSON object with:
+  - tasks: [{id: str, title: str, effort: str, depends_on: [str]}]
+  - parallel_groups: [[task_id, ...]]
+
+model_tier: "cheap"
+allowed_skills:
+  - query_dag
+  - make_checklist
+
+memory_scope: "request-scoped"
+temperature: 0.5
+max_tokens: 1500

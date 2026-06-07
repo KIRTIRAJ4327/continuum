@@ -1,0 +1,105 @@
+%%{init: {'theme':'base', 'themeVariables': {'fontSize':'14px'}}}%%
+flowchart TB
+  %% ============================================================
+  %% Continuum — Agentic SDLC Pipeline : System Architecture (v2.2)
+  %% LangGraph (control) + Azure AI Foundry (runtime) + Neo4j (graph)
+  %% + microVM sandbox (security) + eval harness (trust)
+  %% ============================================================
+
+  IN([" Plain-English feature request "]):::entry
+
+  subgraph EXP["🖥️  EXPERIENCE PLANE"]
+    direction LR
+    UIG["Live agent graph<br/>(node states)"]
+    UIA["Agent activity stream"]
+    UIH["Human-gate inbox"]
+    UIV["Artifact viewer<br/>story · design · diff · tests · PR"]
+  end
+
+  subgraph CTRL["🧭  CONTROL PLANE — LangGraph Supervisor (PEV loop)"]
+    ORCH{{"ORCHESTRATOR<br/>route · gate · finish<br/>(no work tools)"}}
+    GATES[/"Quality gates = contamination FIREWALLS<br/>deterministic sensors as ground truth<br/>green-before-advance · max-3 fix"/]
+    PERM["3-tier permissions<br/>read · sandbox-edit · full-access(HITL)"]
+    CKPT[("Durable checkpointer<br/>Azure DB for PostgreSQL<br/>resume + time-travel · TTL expiry")]
+  end
+
+  subgraph WORK["🤖  AGENT PLANE — isolated Foundry-hosted nodes"]
+    direction LR
+    BSA["BSA<br/>story + AC<br/>(plan = contract)"]
+    ARC["Architect<br/>contract · schema · DAG"]
+    PLN["Planner<br/>(+ dynamic fan-out node)"]
+    DEV["Frontend · Backend · Database<br/>(git-worktree = correctness only)"]
+    SEC["Security<br/>XSS · secrets · CVE"]
+    REV["Code Review<br/>→ raise PR"]
+    PRR["PR Review"]
+    TST["Test<br/>unit + integration"]
+    INF["Infra<br/>IaC plan"]
+    MEM["Memory<br/>learnings"]
+  end
+
+  subgraph SBX["🔒  SANDBOX EXECUTION PLANE — Hyper-V / microVM"]
+    direction LR
+    ACA["Azure Container Apps<br/>dynamic sessions<br/>(GA · egress allow-list)"]
+    HYP["Hyperlight CodeAct pool<br/>(low-latency · snapshot-restore)"]
+    RMRF["agent 'rm -rf /' destroys<br/>only its own throwaway guest"]
+  end
+
+  subgraph RUN["☁️  RUNTIME PLANE — Azure AI Foundry"]
+    direction LR
+    MDL["Tiered models<br/>cheap reasoning + strong codegen"]
+    FMEM["Managed agent memory"]
+    HOST["Hosted agents (azd)<br/>promotion gates = RETAG, not rebuild"]
+  end
+
+  subgraph DATA["📚  KNOWLEDGE & STATE PLANE"]
+    direction LR
+    NEO[("Neo4j<br/>dependency DAG · GraphRAG ·<br/>episodic memory · shared-state<br/>(ground-truth vs belief)")]
+    SRCH[("Azure AI Search<br/>doc/code hybrid RAG")]
+    GOLD[("Golden eval dataset<br/>requests + labels")]
+    BLOB[("Blob Storage<br/>artifacts")]
+  end
+
+  subgraph INTG["🔌  INTEGRATION PLANE — scoped MCP tools"]
+    direction LR
+    ADO["Azure DevOps Remote MCP<br/>work items · PRs · pipelines · wiki<br/>Entra auth · per-tool scope"]
+    WEB["Web research (MCP)"]
+    SCAN["SAST / dependency scanners"]
+  end
+
+  subgraph OBS["🛡️  OBSERVABILITY · EVAL · GOVERNANCE PLANE"]
+    direction LR
+    OTEL["Deep telemetry (OTel)<br/>decision→action→state→outcome<br/>+ rejected alternatives"]
+    EVAL["Eval harness<br/>pass^k · route acc · gate-pass<br/>60/30/10 · calibrated judge"]
+    CIGATE["CI: block-on-regression<br/>via ADO PR status"]
+    EVO["Evolution Agent (offline)<br/>propose → eval → human-promote"]
+    COST["Per-agent token cost<br/>+ budget caps"]
+  end
+
+  %% ---- primary flow ----
+  IN --> EXP
+  EXP <==> CTRL
+  ORCH <==>|"route → 1 agent → report back<br/>(structured brief in, summary out)"| WORK
+  ORCH --- GATES
+  ORCH --- PERM
+  ORCH --- CKPT
+
+  %% ---- sandboxed execution ----
+  WORK ==>|"ALL generated code executes here"| SBX
+  SBX -.sensor results.-> GATES
+
+  %% ---- supporting dependencies ----
+  WORK --> RUN
+  WORK --> DATA
+  WORK --> INTG
+  ARC -.writes DAG.-> NEO
+  ORCH -.queries unblocked tasks.-> NEO
+  CTRL --> OBS
+  WORK --> OBS
+  EVAL -.reads.-> GOLD
+  EVO -.regression-gated improvements.-> CTRL
+
+  classDef entry fill:#10b981,stroke:#065f46,color:#ffffff,font-weight:bold;
+  classDef plane fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
+  classDef sandbox fill:#fef2f2,stroke:#ef4444,color:#7f1d1d;
+  class EXP,CTRL,WORK,RUN,DATA,INTG,OBS plane;
+  class SBX sandbox;
