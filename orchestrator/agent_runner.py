@@ -72,6 +72,7 @@ class AgentContext:
     sandbox: Any = None
     repo_path: str = "."
     tokens: Dict[str, str] = field(default_factory=dict)
+    run_id: str = ""  # set by the API layer; empty in offline / test paths
 
     @classmethod
     def from_env(cls) -> "AgentContext":
@@ -80,6 +81,7 @@ class AgentContext:
         return cls(
             repo_path=os.getenv("REPO_PATH", "."),
             tokens={"jira_token": ado, "ado_token": ado, "auth_token": ado},
+            run_id=os.getenv("CONTINUUM_RUN_ID", ""),
         )
 
 
@@ -662,22 +664,35 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
     decide retry / escalate (Rule 4: max 3 retries, then human_approval).
     """
     from . import gates  # local import: keep agent_runner usable without gates module loaded
+    from .events import event_bus  # lazy to keep offline path free of event overhead
+
+    async def _gate_event(name: str, passed: bool, output: str) -> None:
+        if ctx.run_id:
+            await event_bus.emit(ctx.run_id, {
+                "event_type": "gate_green" if passed else "gate_red",
+                "agent": role,
+                "gate": name,
+                "data": {"output": (output or "")[:500]},
+            })
 
     if role == AgentRole.DEVELOPER.value:
         target = _sandbox_or_local_path(state, ctx)
         passed, output = await gates.gate_local_verify(target)
         gates.update_gate_status(state, "local_verify", passed, output)
+        await _gate_event("local_verify", passed, output)
         logger.info("[GATE] local_verify=%s (%s)", "green" if passed else "red", target)
 
     elif role == AgentRole.SECURITY.value:
         target = _sandbox_or_local_path(state, ctx)
         passed, output = await gates.gate_sast(target)
         gates.update_gate_status(state, "security_sast", passed, output)
+        await _gate_event("security_sast", passed, output)
         logger.info("[GATE] security_sast=%s (%s)", "green" if passed else "red", target)
 
     elif role == AgentRole.ARCHITECT.value and state.contract:
         passed, output = await gates.gate_contract_validate(state.contract)
         gates.update_gate_status(state, "contract_validate", passed, output)
+        await _gate_event("contract_validate", passed, output)
         logger.info("[GATE] contract_validate=%s", "green" if passed else "red")
 
 
@@ -983,8 +998,19 @@ async def run_agent(
         The updated ContinuumState (with `current_agent` set to this role).
     """
     ctx = ctx or AgentContext.from_env()
+    run_id = ctx.run_id or (state.run_id or "")
     started = time.time()
     logger.info("[%s] Starting agent run", role.upper())
+
+    # --- Emit agent_start ---
+    if run_id:
+        from .events import event_bus  # lazy import so offline path stays clean
+        await event_bus.emit(run_id, {
+            "event_type": "agent_start",
+            "agent": role,
+            "run_id": run_id,
+            "data": {},
+        })
 
     try:
         spec = load_agent_spec(role)
@@ -1023,6 +1049,7 @@ async def run_agent(
     except Exception as exc:  # noqa: BLE001 - gate failure must not crash the run
         logger.exception("[%s] Post-gate failed: %s", role.upper(), exc)
 
+    elapsed = time.time() - started
     state.messages.append(
         AgentMessage(
             agent=AgentRole(role),
@@ -1030,5 +1057,31 @@ async def run_agent(
             content=json.dumps(data, default=str)[:4000],
         )
     )
-    logger.info("[%s] Complete in %.2fs", role.upper(), time.time() - started)
+
+    # --- Emit agent_complete ---
+    if run_id:
+        from .events import event_bus  # already imported above but kept lazy per usage
+        await event_bus.emit(run_id, {
+            "event_type": "agent_complete",
+            "agent": role,
+            "run_id": run_id,
+            "data": {
+                "duration_s": round(elapsed, 2),
+                "artifact_keys": _artifact_summary(role, state),
+            },
+        })
+
+    logger.info("[%s] Complete in %.2fs", role.upper(), elapsed)
     return state
+
+
+def _artifact_summary(role: str, state: ContinuumState) -> List[str]:
+    """Return the keys of artifacts this role produced (for the UI artifact viewer)."""
+    mapping: Dict[str, List[str]] = {
+        AgentRole.BSA.value:       ["story"],
+        AgentRole.ARCHITECT.value: ["contract", "schema", "dag"],
+        AgentRole.PLANNER.value:   ["dag.plan"],
+        AgentRole.DEVELOPER.value: ["code"],
+        AgentRole.SECURITY.value:  ["gates.security_sast"],
+    }
+    return mapping.get(role, [])

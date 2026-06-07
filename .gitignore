@@ -28,3 +28,6 @@ build/
 .coverage
 htmlcov/
 
+node_modules/
+ui/dist/
+ui/Tempnpm-cache/
