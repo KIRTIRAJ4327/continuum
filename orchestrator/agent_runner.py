@@ -488,8 +488,19 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
         if files:
             state.code = {**(state.code or {}), **files}
 
-    # SECURITY: the security_sast gate is now run as a real post-gate
-    # (see `_run_post_gates`); no state mutation here.
+    elif role == AgentRole.SECURITY.value:
+        # Fallback gate record from the skill's structured output — this ensures
+        # apply_agent_output() alone sets a GateStatus (needed by unit tests that
+        # call apply_agent_output directly, without going through run_agent /
+        # _run_post_gates). The real post-gate in _run_post_gates() may
+        # subsequently overwrite this with bandit/semgrep results.
+        sec_pass = bool(data.get("pass", True))
+        _set_gate(
+            state,
+            "security_sast",
+            "green" if sec_pass else "red",
+            None if sec_pass else str(data.get("issues", [])),
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -93,6 +93,7 @@ def test_apply_developer_output_list_form():
 
 
 def test_apply_security_failure_sets_red_gate():
+    """apply_agent_output() sets a red security_sast gate from skill output (fallback path)."""
     state = ContinuumState(request="x")
     apply_agent_output(
         state,
@@ -101,3 +102,24 @@ def test_apply_security_failure_sets_red_gate():
     )
     gate = next(g for g in state.gates if g.name == "security_sast")
     assert gate.status == "red" and gate.error_message
+
+
+def test_apply_security_pass_sets_green_gate():
+    """apply_agent_output() sets a green security_sast gate when skill reports clean."""
+    state = ContinuumState(request="x")
+    apply_agent_output(
+        state,
+        AgentRole.SECURITY.value,
+        {"pass": True, "issues": []},
+    )
+    gate = next(g for g in state.gates if g.name == "security_sast")
+    assert gate.status == "green"
+    assert gate.error_message is None
+
+
+def test_state_m1_approval_fields():
+    """M1 approval fields default to False."""
+    state = ContinuumState(request="x")
+    assert state.story_approved is False
+    assert state.design_approved is False
+    assert state.merge_approved is False

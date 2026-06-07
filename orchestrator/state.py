@@ -63,6 +63,11 @@ class ContinuumState:
     human_approval_pending: bool = False
     approval_gate_name: Optional[str] = None
     error_message: Optional[str] = None
+
+    # M1: human approval checkpoints (interrupt() gates)
+    story_approved: bool = False      # set True after human approves BSA story
+    design_approved: bool = False     # set True after human approves Architect design
+    merge_approved: bool = False      # set True after human approves the final PR
     
     # Metadata
     run_id: Optional[str] = None

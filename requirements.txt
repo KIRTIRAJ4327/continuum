@@ -1,45 +1,70 @@
-# Core orchestration
-langgraph==0.0.27
-langchain==0.1.20
-langchain-azure-ai==0.1.0
-langchain-openai==0.0.14
+# ============================================================
+# Continuum — requirements.txt (M1-compatible, June 2026)
+# ============================================================
+# BREAKING CHANGES from M0 pins:
+#   langgraph  0.0.27 → 1.0.0+ (interrupt(), Command, prebuilt supervisor)
+#   langchain  0.1.20 → 0.3.x  (stable LTS track alongside 1.x)
+#   langchain-azure-ai 0.1.0 → 1.2.x (Azure AI Foundry GA)
+#   langchain-openai   0.0.14 → 1.0.x
+#   langgraph-checkpoint-postgres: NOW A SEPARATE PACKAGE (not langgraph.checkpoint.postgres)
+#   psycopg2-binary → psycopg[binary]>=3.1 (langgraph-checkpoint-postgres uses psycopg3)
+#   neo4j-agent-memory REMOVED (does not exist on PyPI)
+# ============================================================
 
-# Azure SDKs
-azure-identity==1.15.0
-azure-storage-blob==12.19.0
-azure-data-tables==12.15.0
+# --- Core orchestration ---
+langgraph>=1.0.0,<2.0.0
+langgraph-checkpoint-postgres>=3.0.0    # separate package; import: from langgraph_checkpoint_postgres import AsyncPostgresSaver
+langgraph-supervisor>=0.0.1             # create_supervisor helper (optional but useful for M1)
 
-# Graph database
-neo4j==5.15.0
-neo4j-agent-memory==0.1.0
+# --- LangChain (stable LTS track) ---
+langchain>=0.3.0
+langchain-core>=0.3.0
 
-# Web framework
-fastapi==0.104.0
-uvicorn==0.24.0
-pydantic==2.5.0
+# --- Azure AI Foundry integration ---
+langchain-azure-ai>=1.2.0              # init_chat_model("azure_ai:..."), AzureAIChatCompletionsModel
+langchain-openai>=1.0.0                # fallback / OpenAI-compatible endpoints
 
-# Database
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+# --- Azure SDKs ---
+azure-identity>=1.15.0                 # DefaultAzureCredential, managed identity
+azure-storage-blob>=12.19.0
 
-# AI / evals
-opentelemetry-api==1.21.0
-opentelemetry-sdk==1.21.0
-opentelemetry-exporter-azure-monitor==1.1.1
-langsmith==0.1.0
+# --- Graph database ---
+neo4j>=5.15.0                          # async driver; use AsyncGraphDatabase.driver()
+# neo4j-agent-memory removed: does not exist on PyPI
+# Reference implementation only: https://github.com/neo4j-labs/agent-memory
 
-# Testing
-pytest==7.4.0
-pytest-asyncio==0.21.1
-pytest-cov==4.1.0
+# --- Web framework ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.5.0
 
-# Utilities
-python-dotenv==1.0.0
-pyyaml==6.0.1
-httpx==0.25.1
-aiofiles==23.2.1
+# --- Database (checkpointer) ---
+# langgraph-checkpoint-postgres requires psycopg3 (NOT psycopg2)
+psycopg[binary]>=3.1.0                 # psycopg3; replaces psycopg2-binary
+asyncpg>=0.29.0                        # still used by direct async queries if needed
 
-# Linting / formatting
-ruff==0.1.8
-mypy==1.7.0
-black==23.12.0
+# --- Observability ---
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+opentelemetry-exporter-azure-monitor>=1.0.0
+
+# --- Evals / tracing ---
+langsmith>=0.2.0                       # LangGraph trajectory eval, OTel ingestion
+
+# --- HTTP client ---
+httpx>=0.27.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+aiofiles>=23.2.1
+
+# --- Testing ---
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# --- Linting / formatting ---
+ruff>=0.4.0
+mypy>=1.10.0
+black>=24.0.0
