@@ -68,8 +68,12 @@ class ContinuumGraph:
         graph.add_node("orchestrator", self._route)
         # Each agent node is a closure bound to its role so the runner knows
         # which agent it is (LangGraph nodes only receive `state`).
-        for role in ["bsa", "architect", "planner", "developer", "security",
-                     "code_review", "pr_review", "test"]:
+        for role in [
+            "bsa", "architect", "planner",
+            # M1 T3: developer split
+            "developer", "database", "backend", "frontend",
+            "security", "code_review", "pr_review", "test",
+        ]:
             graph.add_node(role, self._make_runner(role))
         graph.add_node("human_gate", self._human_gate_node)
         graph.add_node("finish", self._finish)
@@ -86,6 +90,10 @@ class ContinuumGraph:
                 "architect": "architect",
                 "planner": "planner",
                 "developer": "developer",
+                # M1 T3: dev sub-agents
+                "database": "database",
+                "backend": "backend",
+                "frontend": "frontend",
                 "security": "security",
                 "code_review": "code_review",
                 "pr_review": "pr_review",
@@ -96,8 +104,11 @@ class ContinuumGraph:
         )
 
         # All agent nodes route back to orchestrator
-        for agent in ["bsa", "architect", "planner", "developer", "security",
-                      "code_review", "pr_review", "test"]:
+        for agent in [
+            "bsa", "architect", "planner",
+            "developer", "database", "backend", "frontend",
+            "security", "code_review", "pr_review", "test",
+        ]:
             graph.add_edge(agent, "orchestrator")
 
         # Human gate resumes back to orchestrator after interrupt() is resolved
@@ -117,12 +128,19 @@ class ContinuumGraph:
         - Rule 2: Every stage is a gate (check gate status before routing)
         - Rule 4: Max 3 retries per gate (GateStatus.retry_count)
         - Rule 9: No work tools — only route/finish
+
+        M1 human gates (interrupt() checkpoints):
+        - story_review  : after BSA — operator approves user story before design
+        - design_review : after Architect — operator approves architecture before dev
+        - local_verify  : after Developer (3 retries) — escalate persistent failures
+        - merge_review  : after Security — operator approves final PR before merge
         """
         logger.info("[ORCHESTRATOR] Routing decision for run %s", state.run_id)
 
+        # If a previous interrupt() hasn't been resolved yet, re-enter the gate.
         if state.human_approval_pending:
-            logger.info("  -> Human approval pending at gate '%s'", state.approval_gate_name)
-            state.next_agent = None   # _next_node returns "human_gate"
+            logger.info("  -> Human approval still pending at gate '%s'", state.approval_gate_name)
+            state.next_agent = None  # _next_node returns "human_gate"
             return state
 
         if state.current_agent is None:
@@ -130,46 +148,87 @@ class ContinuumGraph:
             state.next_agent = AgentRole.BSA
 
         elif state.current_agent == AgentRole.BSA:
-            logger.info("  -> BSA complete: routing to Architect")
-            state.next_agent = AgentRole.ARCHITECT
+            if not state.story_approved:
+                logger.info("  -> BSA done: awaiting story approval (story_review gate)")
+                state.human_approval_pending = True
+                state.approval_gate_name = "story_review"
+                state.next_agent = None
+            else:
+                logger.info("  -> Story approved: routing to Architect")
+                state.next_agent = AgentRole.ARCHITECT
 
         elif state.current_agent == AgentRole.ARCHITECT:
-            logger.info("  -> Architect complete: routing to Planner")
-            state.next_agent = AgentRole.PLANNER
+            if not state.design_approved:
+                logger.info("  -> Architect done: awaiting design approval (design_review gate)")
+                state.human_approval_pending = True
+                state.approval_gate_name = "design_review"
+                state.next_agent = None
+            else:
+                logger.info("  -> Design approved: routing to Planner")
+                state.next_agent = AgentRole.PLANNER
 
         elif state.current_agent == AgentRole.PLANNER:
-            logger.info("  -> Planner complete: routing to Developer")
-            state.next_agent = AgentRole.DEVELOPER
+            # M1 T3: route Planner → DATABASE (first sub-agent in the dev chain)
+            logger.info("  -> Planner done: routing to Database sub-agent")
+            state.next_agent = AgentRole.DATABASE
 
-        elif state.current_agent == AgentRole.DEVELOPER:
+        elif state.current_agent == AgentRole.DATABASE:
+            logger.info("  -> Database done: routing to Backend sub-agent")
+            state.next_agent = AgentRole.BACKEND
+
+        elif state.current_agent == AgentRole.BACKEND:
+            logger.info("  -> Backend done: routing to Frontend sub-agent")
+            state.next_agent = AgentRole.FRONTEND
+
+        elif state.current_agent in (AgentRole.DEVELOPER, AgentRole.FRONTEND):
+            # local_verify runs after the last dev sub-agent (FRONTEND) or legacy DEVELOPER
             gate = next((g for g in state.gates if g.name == "local_verify"), None)
             if gate and gate.status == "red":
                 if gate.retry_count < 3:
-                    logger.warning("  -> local_verify FAILED (attempt %d/3), dev retries",
-                                   gate.retry_count + 1)
+                    logger.warning(
+                        "  -> local_verify FAILED (attempt %d/3), dev retries",
+                        gate.retry_count + 1,
+                    )
                     gate.retry_count += 1
-                    state.next_agent = AgentRole.DEVELOPER
+                    # Retry by re-running the FRONTEND agent (it regenerates all code)
+                    state.next_agent = (
+                        AgentRole.FRONTEND
+                        if state.current_agent == AgentRole.FRONTEND
+                        else AgentRole.DEVELOPER
+                    )
                 else:
                     logger.error("  -> local_verify FAILED after 3 retries, escalating to human")
                     state.human_approval_pending = True
                     state.approval_gate_name = "local_verify"
                     state.next_agent = None
             elif gate and gate.status == "green":
-                logger.info("  -> local_verify PASSED, routing to Security")
+                logger.info("  -> local_verify PASSED: routing to Security")
                 state.next_agent = AgentRole.SECURITY
             else:
-                state.next_agent = AgentRole.DEVELOPER
+                # Gate not yet set
+                state.next_agent = (
+                    AgentRole.FRONTEND
+                    if state.current_agent == AgentRole.FRONTEND
+                    else AgentRole.DEVELOPER
+                )
 
         elif state.current_agent == AgentRole.SECURITY:
-            logger.info("  -> Security complete: finishing")
-            state.next_agent = None
+            if not state.merge_approved:
+                logger.info("  -> Security done: awaiting merge approval (merge_review gate)")
+                state.human_approval_pending = True
+                state.approval_gate_name = "merge_review"
+                state.next_agent = None
+            else:
+                logger.info("  -> Merge approved: finishing")
+                state.next_agent = None
 
         else:
             logger.info("  -> Default: finishing")
             state.next_agent = None
 
-        logger.info("  -> Next: %s",
-                    state.next_agent.value if state.next_agent else "FINISH")
+        logger.info(
+            "  -> Next: %s", state.next_agent.value if state.next_agent else "FINISH"
+        )
         return state
 
     # ---------------------------------------------------------------------- #
@@ -177,38 +236,66 @@ class ContinuumGraph:
     # ---------------------------------------------------------------------- #
     async def _human_gate_node(self, state: ContinuumState) -> ContinuumState:
         """
-        HUMAN GATE NODE: Pause execution and wait for human decision.
+        HUMAN GATE NODE: Pause execution and wait for a human decision.
 
         Uses langgraph.types.interrupt() so the run is durably suspended in
         the Postgres checkpointer and can be resumed via Command(resume=...).
 
+        Gate types handled:
+          story_review  — sets state.story_approved   = True on approval
+          design_review — sets state.design_approved  = True on approval
+          merge_review  — sets state.merge_approved   = True on approval
+          local_verify  — resets the gate for one more retry on approval
+
         The interrupt payload is surfaced via GET /run/{id} to the operator.
-        On resume, the orchestrator re-routes from the gate that escalated.
+        Rejection (approved=False) leaves human_approval_pending=True so
+        GET /run/{id} shows "escalated" and no further routing occurs.
         """
         try:
-            from langgraph.types import interrupt  # available in langgraph >=0.2 / 1.0+
+            from langgraph.types import interrupt  # available in langgraph >=1.0
+
+            gate_name = state.approval_gate_name or "unknown"
+            message = _gate_message(gate_name)
+
             decision = interrupt({
-                "gate": state.approval_gate_name,
-                "message": (
-                    f"Gate '{state.approval_gate_name}' failed after 3 retries. "
-                    "Approve to retry once more, or reject to abort the run."
-                ),
+                "gate": gate_name,
+                "message": message,
                 "run_id": state.run_id,
+                "artifacts": _gate_artifacts(state, gate_name),
             })
-            if decision and decision.get("approved"):
-                # Reset the gate so the orchestrator re-routes to the failing agent
-                gate = next(
-                    (g for g in state.gates if g.name == state.approval_gate_name), None
-                )
+
+            if not (decision and decision.get("approved")):
+                # Rejected or no decision — leave pending so run stays "escalated"
+                logger.warning("[HUMAN_GATE] Gate '%s' rejected or no decision; run escalated", gate_name)
+                return state
+
+            # --- Approved: update the relevant approval flag ---
+            if gate_name == "story_review":
+                state.story_approved = True
+                logger.info("[HUMAN_GATE] Story approved — Architect will run next")
+
+            elif gate_name == "design_review":
+                state.design_approved = True
+                logger.info("[HUMAN_GATE] Design approved — Planner will run next")
+
+            elif gate_name == "merge_review":
+                state.merge_approved = True
+                logger.info("[HUMAN_GATE] Merge approved — pipeline finishing")
+
+            else:
+                # Gate-failure escalation (e.g., local_verify after 3 retries)
+                # Approved = "give it one more chance"
+                gate = next((g for g in state.gates if g.name == gate_name), None)
                 if gate:
                     gate.retry_count = 0
                     gate.status = "pending"
-                state.human_approval_pending = False
-                state.approval_gate_name = None
-                # Route back to the agent that was failing
-                state.current_agent = None   # orchestrator will re-derive from gates
+                logger.info("[HUMAN_GATE] Gate '%s' reset for retry after human approval", gate_name)
+
+            state.human_approval_pending = False
+            state.approval_gate_name = None
+
         except ImportError:
-            # langgraph not installed — fall back to flag-only approach
+            # langgraph not installed — fall back to flag-only (offline tests)
             logger.warning("interrupt() unavailable; human gate is a no-op in offline mode")
 
         return state
@@ -249,7 +336,7 @@ class ContinuumGraph:
         return state
 
     # ---------------------------------------------------------------------- #
-    # Public entry point
+    # Public entry points
     # ---------------------------------------------------------------------- #
     async def run(self, request: str, thread_id: str) -> ContinuumState:
         """
@@ -277,3 +364,75 @@ class ContinuumGraph:
             config={"configurable": {"thread_id": thread_id}},
         )
         return result
+
+    async def resume(self, thread_id: str, approved: bool) -> Optional[ContinuumState]:
+        """
+        Resume a run that is suspended at a human_gate interrupt().
+
+        Args:
+            thread_id: The thread ID of the suspended run.
+            approved:  True to approve the gate; False to reject (abort).
+
+        Returns:
+            Updated ContinuumState, or None if checkpointer is unavailable.
+        """
+        if self.graph is None:
+            raise RuntimeError("Call await ContinuumGraph.create() before resume()")
+        if self.checkpointer is None:
+            logger.warning("No checkpointer available; resume() is a no-op")
+            return None
+
+        from langgraph.types import Command
+
+        result = await self.graph.ainvoke(
+            Command(resume={"approved": approved}),
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        return result
+
+
+# --------------------------------------------------------------------------- #
+# Gate message helpers
+# --------------------------------------------------------------------------- #
+def _gate_message(gate_name: str) -> str:
+    messages = {
+        "story_review": (
+            "The BSA agent has completed the user story. "
+            "Please review the story and acceptance criteria before design begins. "
+            "Approve to proceed to Architect, or reject to escalate."
+        ),
+        "design_review": (
+            "The Architect agent has produced the OpenAPI contract, database schema, "
+            "and task DAG. Please review the architecture before development begins. "
+            "Approve to proceed to Planner, or reject to escalate."
+        ),
+        "merge_review": (
+            "Security scanning is complete. "
+            "Please review the generated code and test results before merging. "
+            "Approve to finalise the run, or reject to escalate."
+        ),
+    }
+    return messages.get(
+        gate_name,
+        f"Gate '{gate_name}' requires human approval. Approve to continue, reject to abort.",
+    )
+
+
+def _gate_artifacts(state: ContinuumState, gate_name: str) -> dict:
+    """Return the relevant artifacts for the operator to review at each gate."""
+    if gate_name == "story_review":
+        return {"story": state.story}
+    if gate_name == "design_review":
+        return {
+            "contract_preview": (state.contract or "")[:800],
+            "schema_preview": (state.schema or "")[:400],
+            "dag_task_count": len((state.dag or {}).get("tasks", [])),
+        }
+    if gate_name == "merge_review":
+        return {
+            "code_files": list((state.code or {}).keys()),
+            "gates": [
+                {"name": g.name, "status": g.status} for g in state.gates
+            ],
+        }
+    return {}

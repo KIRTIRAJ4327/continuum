@@ -144,7 +144,7 @@ def load_skill(name: str) -> Optional[Callable]:
 
 
 # --------------------------------------------------------------------------- #
-# Model resolution
+# Model resolution  (M1: langchain-azure-ai 1.2.x)
 # --------------------------------------------------------------------------- #
 def _deployment_for_tier(tier: str) -> Optional[str]:
     """Map a model tier to an Azure deployment id from the environment."""
@@ -153,31 +153,81 @@ def _deployment_for_tier(tier: str) -> Optional[str]:
     return os.getenv("AZURE_DEPLOYMENT_STRONG") or os.getenv("AZURE_DEPLOYMENT_ID")
 
 
+def _azure_endpoint() -> Optional[str]:
+    """Return the Azure AI endpoint from env, normalised (no trailing slash)."""
+    ep = os.getenv("AZURE_AI_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
+    return ep.rstrip("/") or None
+
+
 def resolve_model(spec: dict) -> Optional[Any]:
     """
-    Return a LangChain chat model for the agent's tier, or None if no model is
-    configured/available. None triggers the deterministic offline path.
+    Return a LangChain chat model for the agent's tier, or None to trigger
+    the deterministic offline path.
+
+    M1 (langchain-azure-ai 1.2.x) — two credential paths:
+      1. AZURE_AI_ENDPOINT + managed identity  (DefaultAzureCredential)
+      2. AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT  (key-based, dev-only)
+
+    If neither is configured, or if the import/instantiation fails for any
+    reason, we fall back to offline. This ensures the offline path is always
+    reachable (11/11 must pass without credentials).
     """
-    if not (os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("AZURE_INFERENCE_CREDENTIAL")):
-        logger.info("No Azure credentials in environment; using offline agent path")
+    has_key = bool(os.getenv("AZURE_OPENAI_API_KEY"))
+    has_endpoint = bool(_azure_endpoint())
+    has_mi = bool(os.getenv("AZURE_CLIENT_ID") or os.getenv("AZURE_INFERENCE_CREDENTIAL"))
+
+    if not (has_key or has_endpoint or has_mi):
+        logger.info("[MODEL] No Azure credentials found — using offline path")
         return None
 
     tier = spec.get("model_tier", "strong")
     deployment = _deployment_for_tier(tier)
     if not deployment:
-        logger.warning("No deployment configured for tier '%s'; using offline path", tier)
+        logger.warning("[MODEL] No deployment env var for tier '%s' — offline path", tier)
         return None
 
     try:
-        from langchain.chat_models import init_chat_model  # lazy import
+        # langchain-azure-ai 1.2.x preferred import path
+        from langchain_azure_ai.chat_models import AzureChatCompletions  # type: ignore[import]
+        from langchain.chat_models import init_chat_model  # always available in langchain>=0.3
 
-        return init_chat_model(
-            f"azure_ai:{deployment}",
-            temperature=spec.get("temperature", 0.5),
-            max_tokens=spec.get("max_tokens", 2000),
-        )
-    except Exception as exc:  # noqa: BLE001 - any model init failure -> offline
-        logger.warning("Could not initialise model '%s': %s; using offline path", deployment, exc)
+        endpoint = _azure_endpoint()
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+
+        if api_key and endpoint:
+            # Key-based: fastest for local dev
+            model = AzureChatCompletions(
+                azure_endpoint=endpoint,
+                azure_deployment=deployment,
+                api_key=api_key,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                temperature=spec.get("temperature", 0.5),
+                max_tokens=spec.get("max_tokens", 2000),
+            )
+        else:
+            # Managed-identity / DefaultAzureCredential path
+            from azure.identity import DefaultAzureCredential, get_bearer_token_provider  # type: ignore[import]
+            token_provider = get_bearer_token_provider(
+                DefaultAzureCredential(),
+                "https://cognitiveservices.azure.com/.default",
+            )
+            model = AzureChatCompletions(
+                azure_endpoint=endpoint or "",
+                azure_deployment=deployment,
+                azure_ad_token_provider=token_provider,
+                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                temperature=spec.get("temperature", 0.5),
+                max_tokens=spec.get("max_tokens", 2000),
+            )
+
+        logger.info("[MODEL] Resolved %s model: %s (tier=%s)", "live", deployment, tier)
+        return model
+
+    except ImportError as exc:
+        logger.warning("[MODEL] langchain-azure-ai not installed (%s) — offline path", exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[MODEL] Could not init model '%s': %s — offline path", deployment, exc)
         return None
 
 
@@ -311,12 +361,22 @@ async def _run_llm(
     skills: Dict[str, Optional[Callable]],
     ctx: AgentContext,
 ) -> dict:
-    """Run the agent against a live model with its skills bound as tools."""
+    """
+    Run the agent against a live model with its skills bound as tools.
+
+    M1 improvements over M0:
+    - Retries transient HTTP errors (429 rate-limit, 5xx) up to 3×.
+    - Tool-call errors are returned as {"error": ...} ToolMessages so the LLM
+      can self-correct rather than crashing the loop.
+    - Final answer is extracted even if the last response still has tool_calls
+      (LLM didn't finish cleanly) — we force-parse what we have.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage  # lazy
 
     tool_fns = {name: fn for name, fn in skills.items() if fn is not None}
+    system_prompt = build_system_prompt(spec, state)
     messages: List[Any] = [
-        SystemMessage(content=build_system_prompt(spec, state)),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"Execute your task for the request: {state.request}"),
     ]
 
@@ -325,23 +385,57 @@ async def _run_llm(
         runnable = model.bind_tools([_tool_schema(n, f) for n, f in tool_fns.items()])
 
     response: Any = None
-    for _ in range(MAX_TOOL_ITERS):
-        response = await runnable.ainvoke(messages)
+    _MAX_RETRIES = 3
+
+    for iteration in range(MAX_TOOL_ITERS):
+        # --- invoke with retry on transient errors ---
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await runnable.ainvoke(messages)
+                break
+            except Exception as exc:  # noqa: BLE001
+                err_str = str(exc).lower()
+                is_transient = any(x in err_str for x in ("429", "503", "502", "rate", "timeout"))
+                if is_transient and attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt          # 1s, 2s, 4s back-off
+                    logger.warning(
+                        "[LLM] Transient error (attempt %d/%d): %s — retrying in %ds",
+                        attempt + 1, _MAX_RETRIES, exc, wait,
+                    )
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(wait)
+                else:
+                    raise  # non-transient or out of retries → bubble up
+
         messages.append(response)
         tool_calls = getattr(response, "tool_calls", None) or []
+
         if not tool_calls:
+            # Clean final answer
             return _parse_json(getattr(response, "content", "") or "")
+
+        # Execute tool calls; errors become ToolMessage content so LLM can react
         for call in tool_calls:
+            tool_id = call.get("id") or f"call_{iteration}"
             fn = tool_fns.get(call["name"])
             if fn is None:
                 output: Any = {"error": f"unknown tool '{call['name']}'"}
+                logger.warning("[LLM] Unknown tool '%s' requested by model", call["name"])
             else:
-                output = await invoke_skill(fn, call.get("args", {}) or {}, ctx, state)
+                try:
+                    output = await invoke_skill(fn, call.get("args", {}) or {}, ctx, state)
+                except Exception as exc:  # noqa: BLE001
+                    output = {"error": str(exc)}
+                    logger.warning("[LLM] Tool '%s' raised: %s", call["name"], exc)
             messages.append(
-                ToolMessage(content=json.dumps(output, default=str), tool_call_id=call["id"])
+                ToolMessage(
+                    content=json.dumps(output, default=str),
+                    tool_call_id=tool_id,
+                )
             )
 
-    logger.warning("Tool loop exhausted after %d iterations", MAX_TOOL_ITERS)
+    # Loop exhausted — extract best-effort answer from last response
+    logger.warning("[LLM] Tool loop exhausted after %d iterations — forcing final parse", MAX_TOOL_ITERS)
     return _parse_json(getattr(response, "content", "") or "")
 
 
@@ -413,9 +507,58 @@ async def _run_offline(
                 state,
                 contract=state.contract or "",
                 schema=state.schema or "",
+                language="python",
             )
             or {}
         )
+        return {"code": code}
+
+    # --- M1: developer sub-agents (T3) ---
+    if role == AgentRole.DATABASE.value:
+        schema_code = (
+            await _call(
+                skills.get("emit_schema"),
+                ctx,
+                state,
+                story=state.story or {},
+                spec=(state.story or {}).get("spec", {}),
+            )
+            or ""
+        )
+        migration = schema_code if isinstance(schema_code, str) else ""
+        return {
+            "code": {
+                "migrations/001_initial.sql": migration or "-- auto-generated migration placeholder",
+                "seeds/001_reference_data.sql": "-- seed data placeholder",
+            }
+        }
+
+    if role == AgentRole.BACKEND.value:
+        code = (
+            await _call(
+                skills.get("write_code"),
+                ctx,
+                state,
+                contract=state.contract or "",
+                schema=state.schema or "",
+                language="python",
+            )
+            or {}
+        )
+        return {"code": code}
+
+    if role == AgentRole.FRONTEND.value:
+        resource = _resource_from_contract(state.contract or "")
+        code = {
+            "app/layout.tsx": _fe_layout(),
+            "app/page.tsx":   _fe_home(resource),
+            f"app/{resource}s/page.tsx": _fe_list_page(resource),
+            f"app/{resource}s/[id]/page.tsx": _fe_detail_page(resource),
+            f"components/{resource.capitalize()}List.tsx": _fe_list_component(resource),
+            f"components/{resource.capitalize()}Form.tsx": _fe_form_component(resource),
+            "lib/api.ts": _fe_api_client(resource),
+            "lib/types.ts": _fe_types(resource),
+        }
         return {"code": code}
 
     if role == AgentRole.SECURITY.value:
@@ -484,7 +627,13 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
     elif role == AgentRole.PLANNER.value:
         state.dag = {**(state.dag or {}), "plan": data}
 
-    elif role == AgentRole.DEVELOPER.value:
+    elif role in (
+        AgentRole.DEVELOPER.value,
+        AgentRole.DATABASE.value,
+        AgentRole.BACKEND.value,
+        AgentRole.FRONTEND.value,
+    ):
+        # All developer sub-agents merge their files into state.code
         files = _files_from(data.get("code"))
         files.update(_files_from(data.get("tests")))
         if files:
@@ -545,6 +694,277 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
         gates.update_gate_status(state, "contract_validate", passed, output)
         await _gate_event("contract_validate", passed, output)
         logger.info("[GATE] contract_validate=%s", "green" if passed else "red")
+
+
+# --------------------------------------------------------------------------- #
+# Frontend scaffold helpers (used by FRONTEND offline path)
+# --------------------------------------------------------------------------- #
+def _resource_from_contract(contract: str) -> str:
+    """Derive the primary resource name from the OpenAPI contract."""
+    import re
+    m = re.search(r"^\s{2}/([a-z][a-z0-9_-]+)s?:", contract, re.MULTILINE)
+    if m:
+        return m.group(1).rstrip("s")
+    return "item"
+
+
+def _fe_layout() -> str:
+    return '''\
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = { title: "Continuum App", description: "Generated by Continuum" };
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body className="min-h-screen bg-background font-sans antialiased">
+        <main className="container mx-auto py-8">{children}</main>
+      </body>
+    </html>
+  );
+}
+'''
+
+
+def _fe_home(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+import Link from "next/link";
+
+export default function Home() {{
+  return (
+    <div className="flex flex-col gap-4">
+      <h1 className="text-3xl font-bold">Continuum Dashboard</h1>
+      <Link href="/{resource}s" className="text-blue-600 underline">
+        View all {cap}s
+      </Link>
+    </div>
+  );
+}}
+'''
+
+
+def _fe_list_page(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+"use client";
+import {{ {cap}List }} from "@/components/{cap}List";
+
+export default function {cap}sPage() {{
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-6">{cap}s</h1>
+      <{cap}List />
+    </div>
+  );
+}}
+'''
+
+
+def _fe_detail_page(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+"use client";
+import {{ use{cap} }} from "@/lib/api";
+
+export default function {cap}DetailPage({{ params }}: {{ params: {{ id: string }} }}) {{
+  const {{ data, isLoading, error }} = use{cap}(params.id);
+  if (isLoading) return <p>Loading...</p>;
+  if (error) return <p className="text-red-500">Error loading {resource}.</p>;
+  if (!data) return <p>Not found.</p>;
+  return (
+    <div className="space-y-4">
+      <h1 className="text-2xl font-bold">{{data.name}}</h1>
+      {{data.description && <p className="text-muted-foreground">{{data.description}}</p>}}
+      <p className="text-sm text-muted-foreground">Created: {{new Date(data.created_at).toLocaleString()}}</p>
+    </div>
+  );
+}}
+'''
+
+
+def _fe_list_component(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+"use client";
+import useSWR from "swr";
+import {{ fetcher }} from "@/lib/api";
+import type {{ {cap} }} from "@/lib/types";
+import Link from "next/link";
+
+export function {cap}List() {{
+  const {{ data, isLoading, error }} = useSWR<{{ items: {cap}[]; total: number }}>(
+    "/api/{resource}s",
+    fetcher
+  );
+
+  if (isLoading) return <p>Loading {resource}s…</p>;
+  if (error) return <p className="text-red-500">Failed to load {resource}s.</p>;
+
+  const items = data?.items ?? [];
+
+  return (
+    <div className="divide-y rounded-lg border">
+      {{items.length === 0 && (
+        <p className="p-4 text-muted-foreground">No {resource}s yet.</p>
+      )}}
+      {{items.map((item) => (
+        <div key={{item.id}} className="flex items-center justify-between p-4">
+          <Link href="/{resource}s/{{item.id}}" className="font-medium hover:underline">
+            {{item.name}}
+          </Link>
+          <span className="text-sm text-muted-foreground">{{item.status}}</span>
+        </div>
+      ))}}
+    </div>
+  );
+}}
+'''
+
+
+def _fe_form_component(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+"use client";
+import {{ useState }} from "react";
+
+interface Props {{
+  onSuccess?: () => void;
+}}
+
+export function {cap}Form({{ onSuccess }}: Props) {{
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {{
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {{
+      const res = await fetch("/api/{resource}s", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ name, description }}),
+      }});
+      if (!res.ok) throw new Error(await res.text());
+      setName("");
+      setDescription("");
+      onSuccess?.();
+    }} catch (err: unknown) {{
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }} finally {{
+      setLoading(false);
+    }}
+  }}
+
+  return (
+    <form onSubmit={{handleSubmit}} className="space-y-4">
+      <div>
+        <label htmlFor="name" className="block text-sm font-medium">Name *</label>
+        <input
+          id="name" value={{name}} onChange={{(e) => setName(e.target.value)}}
+          required className="mt-1 block w-full rounded-md border px-3 py-2"
+        />
+      </div>
+      <div>
+        <label htmlFor="description" className="block text-sm font-medium">Description</label>
+        <textarea
+          id="description" value={{description}} onChange={{(e) => setDescription(e.target.value)}}
+          rows={{3}} className="mt-1 block w-full rounded-md border px-3 py-2"
+        />
+      </div>
+      {{error && <p className="text-red-500 text-sm">{{error}}</p>}}
+      <button
+        type="submit" disabled={{loading}}
+        className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+      >
+        {{loading ? "Creating…" : "Create {cap}"}}
+      </button>
+    </form>
+  );
+}}
+'''
+
+
+def _fe_api_client(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+import useSWR from "swr";
+import type {{ {cap}, {cap}Input, PaginatedResponse }} from "./types";
+
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+export async function fetcher<T>(url: string): Promise<T> {{
+  const res = await fetch(BASE_URL + url);
+  if (!res.ok) throw new Error(`HTTP ${{res.status}}: ${{await res.text()}}`);
+  return res.json() as Promise<T>;
+}}
+
+export function use{cap}s(page = 1, pageSize = 20) {{
+  return useSWR<PaginatedResponse<{cap}>>(
+    `/{resource}s?page=${{page}}&page_size=${{pageSize}}`,
+    fetcher
+  );
+}}
+
+export function use{cap}(id: string) {{
+  return useSWR<{cap}>(id ? `/{resource}s/${{id}}` : null, fetcher);
+}}
+
+export async function create{cap}(data: {cap}Input): Promise<{cap}> {{
+  const res = await fetch(`${{BASE_URL}}/{resource}s`, {{
+    method: "POST",
+    headers: {{ "Content-Type": "application/json" }},
+    body: JSON.stringify(data),
+  }});
+  if (!res.ok) throw new Error(`Create failed: ${{await res.text()}}`);
+  return res.json();
+}}
+
+export async function update{cap}(id: string, data: {cap}Input): Promise<{cap}> {{
+  const res = await fetch(`${{BASE_URL}}/{resource}s/${{id}}`, {{
+    method: "PUT",
+    headers: {{ "Content-Type": "application/json" }},
+    body: JSON.stringify(data),
+  }});
+  if (!res.ok) throw new Error(`Update failed: ${{await res.text()}}`);
+  return res.json();
+}}
+
+export async function delete{cap}(id: string): Promise<void> {{
+  const res = await fetch(`${{BASE_URL}}/{resource}s/${{id}}`, {{ method: "DELETE" }});
+  if (!res.ok && res.status !== 204) throw new Error(`Delete failed: ${{await res.text()}}`);
+}}
+'''
+
+
+def _fe_types(resource: str) -> str:
+    cap = resource.capitalize()
+    return f'''\
+export interface {cap} {{
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}}
+
+export interface {cap}Input {{
+  name: string;
+  description?: string | null;
+}}
+
+export interface PaginatedResponse<T> {{
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}}
+'''
 
 
 def _sandbox_or_local_path(state: ContinuumState, ctx: AgentContext) -> str:
