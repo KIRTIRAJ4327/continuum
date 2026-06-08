@@ -33,6 +33,36 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Continuum", version="0.2.0")
 
+
+@app.on_event("startup")
+async def validate_env() -> None:
+    """
+    Warn about missing optional env vars at startup.
+
+    The server ALWAYS starts — even without any credentials — because the
+    offline/stub path handles all cases.  This validator only logs warnings so
+    operators know which integrations are in stub mode.
+    """
+    try:
+        from config import warn_missing_optional, AZURE_AI_LIVE, AZURE_ADO_LIVE  # type: ignore
+        missing = warn_missing_optional()
+        if not missing:
+            logger.info(
+                "[startup] All optional env vars set — live path active "
+                "(Azure AI: %s, ADO: %s)",
+                AZURE_AI_LIVE,
+                AZURE_ADO_LIVE,
+            )
+        else:
+            logger.info(
+                "[startup] Running in offline/stub mode for: %s "
+                "— set vars in .env to enable live integrations",
+                ", ".join(missing),
+            )
+    except ImportError:
+        logger.debug("[startup] config module not available — skipping env validation")
+
+
 # Allow the Vite dev server (port 5173) to call the API during development.
 app.add_middleware(
     CORSMiddleware,
