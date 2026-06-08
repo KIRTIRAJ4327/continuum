@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 eval-baseline eval-ci eval-report run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -14,6 +14,10 @@ help:
 	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only"
 	@echo "  make verify-m3      — Run M3 learning-lift demo (6/6)"
 	@echo "  make verify-m4      — Run M4 CI gate (must exit 0)"
+	@echo "  make verify-m5      — Run M5 Evolution Agent demo (6/6)"
+	@echo "  make evo-observe    — Print current failure patterns from event history"
+	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
+	@echo "  make evo-promote    — List pending proposals; apply by ID"
 	@echo "  make eval-baseline  — Run full suite (20 cases), write baseline.json"
 	@echo "  make eval-ci        — Fast CI check (5 cases, block on regression)"
 	@echo "  make eval-report    — Full pass^k report (k=5, all 20 cases)"
@@ -75,6 +79,38 @@ verify-m3:
 verify-m4:
 	@echo "Running M4 CI gate..."
 	python evals/ci_gate.py
+
+verify-m5:
+	@echo "Running M5 Evolution Agent verification (6/6)..."
+	python scripts/verify_m5_evolution.py
+
+evo-observe:
+	@echo "Current failure patterns from event history:"
+	python -c "from evolution.agent import EvolutionAgent; import json; print(json.dumps(EvolutionAgent().observe(), indent=2))"
+
+evo-propose:
+	@echo "Generating and evaluating a proposal..."
+	python -c "\
+import asyncio, json, sys; \
+sys.path.insert(0, '.'); \
+from evolution.agent import EvolutionAgent; \
+from evolution import evaluator; \
+evo = EvolutionAgent(); \
+p = evo.observe(); d = evo.diagnose(p); proposal = evo.propose(d); \
+result = asyncio.run(evaluator.evaluate(proposal, fast=True)); \
+print('Proposal:', json.dumps({k: proposal[k] for k in ('id','type','file','rationale')}, indent=2)); \
+print('Eval:', json.dumps(result, indent=2)); \
+print('Written to: evolution/proposals/pending/', proposal.get('id') + '.json')"
+
+evo-promote:
+	@echo "Pending proposals:"
+	python -c "\
+import json; \
+from evolution.promoter import list_pending; \
+pending = list_pending(); \
+[print(f\"  {p['id']}  type={p['type']}  file={p['file']}  created={p['created_at']}\") for p in pending] if pending else print('  (none)'); \
+print(); \
+print('To promote: python -c \"from evolution.promoter import human_promote; human_promote(\\\"<id>\\\")\"')"
 
 eval-baseline:
 	@echo "Running full eval suite (20 cases, k=3) — writing baseline..."
