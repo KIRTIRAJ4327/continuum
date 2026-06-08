@@ -509,7 +509,7 @@ make evo-promote      # list pending proposals, apply selected
 
 <div align="center">
 
-**Built on the Continuum Framework · ShyftLabs Hackathon 2026**
+**Built on the Continuum Framework**
 
 *A plain-English request enters. A supervised swarm of agents carries it through the entire SDLC.*
 *Deterministic gates. Hardware-isolated sandboxes. A pipeline that learns.*
