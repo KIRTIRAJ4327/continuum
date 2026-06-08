@@ -1,0 +1,22 @@
+{
+  "id": "evo-ba7b1ca1",
+  "type": "prompt_edit",
+  "file": "agents/bsa.yaml",
+  "before": "acceptance_criteria: []",
+  "after": "acceptance_criteria: []  # minimum 3 criteria required",
+  "rationale": "BSA produces stories with too few acceptance criteria. Adding an explicit minimum in the instructions increases story quality.",
+  "diagnosis_type": "prompt_issue",
+  "confidence": 0.9,
+  "pattern": {
+    "agent": "bsa",
+    "failure_type": "low_ac_count",
+    "gate": null,
+    "count": 2,
+    "fraction": 0.4,
+    "sample_error": "story has fewer than 2 acceptance criteria"
+  },
+  "recommendation": "Add explicit minimum AC count to BSA instructions",
+  "estimated_improvement_pp": 9.0,
+  "created_at": 1780889476,
+  "status": "pending"
+}

@@ -1,1 +1,1 @@
-# Evolution Agent (M5+)
+# M5 Evolution Agent package

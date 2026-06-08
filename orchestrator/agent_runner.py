@@ -520,11 +520,26 @@ async def _run_offline(
         feature_id = (state.dag or {}).get("dag_id", "dag-1")
         queried = await _call(skills.get("query_dag"), ctx, state, feature_id=feature_id) or {}
         checklist = await _call(skills.get("make_checklist"), ctx, state, dag=queried) or {}
-        return {
-            "tasks": queried.get("all_tasks", []),
+
+        tasks = queried.get("all_tasks", [])
+        # M5: if the DAG has >= 5 tasks, generate a decomposition script for operator use.
+        decomposition_script: Optional[str] = None
+        if len(tasks) >= 5:
+            try:
+                from orchestrator.decomposer import generate_script
+                decomposition_script = generate_script(state.dag or {})
+                logger.info("[PLANNER] DAG has %d tasks — decomposition script generated", len(tasks))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[PLANNER] Decomposer failed: %s", exc)
+
+        result: Dict[str, Any] = {
+            "tasks": tasks,
             "parallel_groups": queried.get("parallel_groups", []),
             "checklist": checklist,
         }
+        if decomposition_script:
+            result["decomposition_script"] = decomposition_script
+        return result
 
     if role == AgentRole.DEVELOPER.value:
         code = (
@@ -628,6 +643,26 @@ async def _run_offline(
 
         return {"episode": ep, "episodes_written": 1}
 
+    # M5: Evolution Agent — observe telemetry, diagnose patterns, propose a change.
+    if role == AgentRole.EVOLUTION.value:
+        try:
+            telemetry = await _call(skills.get("read_telemetry"), ctx, state) or {}
+        except Exception:  # noqa: BLE001
+            telemetry = {}
+
+        from evolution.agent import EvolutionAgent
+        evo_agent = EvolutionAgent()
+        patterns = evo_agent.observe()
+        diagnoses = evo_agent.diagnose(patterns)
+        proposal = evo_agent.propose(diagnoses) if diagnoses else {}
+
+        return {
+            "telemetry": telemetry,
+            "patterns_found": len(patterns),
+            "proposal": proposal,
+            "action": "proposal_written" if proposal else "no_action",
+        }
+
     return {}
 
 
@@ -691,7 +726,11 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
             state.dag = dag
 
     elif role == AgentRole.PLANNER.value:
-        state.dag = {**(state.dag or {}), "plan": data}
+        plan_data = {k: v for k, v in data.items() if k != "decomposition_script"}
+        state.dag = {**(state.dag or {}), "plan": plan_data}
+        # M5: store decomposition script when generated.
+        if data.get("decomposition_script"):
+            state.decomposition_script = data["decomposition_script"]
 
     elif role in (
         AgentRole.DEVELOPER.value,
@@ -724,6 +763,10 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
         if data.get("episode"):
             state.episodes_written = list(state.episodes_written or [])
             state.episodes_written.append(data["episode"])
+
+    elif role == AgentRole.EVOLUTION.value:
+        # M5: telemetry + proposals are informational; no state mutation needed.
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -1156,5 +1199,6 @@ def _artifact_summary(role: str, state: ContinuumState) -> List[str]:
         AgentRole.DEVELOPER.value: ["code"],
         AgentRole.SECURITY.value:  ["gates.security_sast"],
         AgentRole.MEMORY.value:    ["episodes_written"],
+        AgentRole.EVOLUTION.value: ["proposal"],
     }
     return mapping.get(role, [])
