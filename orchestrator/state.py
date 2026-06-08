@@ -1,5 +1,5 @@
 # File: continuum/orchestrator/state.py
-# UPDATED: M1 — added approval fields + developer sub-agent roles
+# UPDATED: M3 — added episodic memory fields (episodes, episodes_written)
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -76,6 +76,12 @@ class ContinuumState:
     story_approved:  bool = False   # True after human approves BSA story
     design_approved: bool = False   # True after human approves Architect design
     merge_approved:  bool = False   # True after human approves the final PR
+
+    # M3: Episodic memory
+    # Past episodes retrieved by graphrag_query at run start (grounding context).
+    episodes: Optional[List[Dict[str, Any]]] = None
+    # Episodes written by the Memory agent at run end.
+    episodes_written: Optional[List[Dict[str, Any]]] = None
 
     # Metadata
     run_id: Optional[str] = None
