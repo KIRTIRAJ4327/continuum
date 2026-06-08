@@ -99,7 +99,7 @@ The pipeline has two execution paths that swap transparently:
 | **Neo4j** | In-memory episode store | Neo4j 5.15 via Bolt |
 | **Postgres** | No checkpointing | AsyncPostgresSaver (durable resume) |
 | **Azure DevOps** | No-op | Real PRs via REST API v7.1 |
-| **Verify suite** | Passes 11/11 + 3/3 + 6/6 + 6/6 | Same checks, real artifacts |
+| **Verify suite** | 11/11 + 3/3 + 6/6(M3) + CI-gate + 6/6(M5) all pass | Same checks, real artifacts |
 
 Switch between modes by setting/unsetting Azure env vars. No code changes needed.
 
@@ -112,10 +112,10 @@ Switch between modes by setting/unsetting Azure env vars. No code changes needed
 | **BSA** | Business Systems Analyst | `create_story`, `write_spec`, `graphrag_query` | Story + acceptance criteria |
 | **Architect** | System designer | `emit_contract`, `emit_schema`, `write_dag` | OpenAPI contract, SQL schema, DAG |
 | **Planner** | Task decomposer | `query_dag`, `make_checklist` | Ordered task list + checklist |
-| **Database** | Migration author | `emit_schema` | SQL migrations + seeds |
-| **Backend** | API implementer | `write_code` | FastAPI routes + models |
+| **Database** | Migration author | `write_code`, `emit_schema` | SQL migrations + seeds |
+| **Backend** | API implementer | `write_code`, `emit_contract` | FastAPI routes + models |
 | **Frontend** | UI implementer | `write_code` | Next.js pages + components |
-| **Security** | SAST scanner | `run_sast` | Issue list + gate status |
+| **Security** | SAST scanner | `run_sast`, `scan_deps`, `secret_scan` | Issue list + gate status |
 | **Memory** | Episode recorder | `write_episode`, `graphrag_query` | Episodes stored in Neo4j |
 | **Evolution** | Self-improver | `read_telemetry`, `propose_patch`, `run_regression_evals` | Proposals in `pending/` |
 
@@ -467,10 +467,12 @@ When the Planner produces a DAG with ≥ 5 tasks, `orchestrator/decomposer.py` g
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/run` | Submit a feature request; returns `{run_id, status}` |
+| `GET` | `/runs` | List all run IDs and statuses |
 | `GET` | `/run/{run_id}` | Poll run status and artifact summary |
 | `GET` | `/events/{run_id}` | SSE stream of agent events (real-time) |
 | `POST` | `/run/{run_id}/resume` | Resume a human gate (`?approved=true/false`) |
-| `GET` | `/artifacts/{run_id}/{type}` | Fetch an artifact (`story`, `contract`, `schema`, `code`, `memory`) |
+| `GET` | `/artifacts/{run_id}/{agent}` | Fetch agent artifact by role name (see below) |
+| `GET` | `/health` | Health check |
 
 ### Submit a request
 
@@ -488,7 +490,30 @@ curl -N http://localhost:8000/events/abc-123
 # → data: {"event_type": "agent_start", "agent": "bsa", ...}
 # → data: {"event_type": "agent_complete", "agent": "bsa", "data": {"duration_s": 1.2}}
 # → data: {"event_type": "gate_green", "gate": "local_verify", ...}
-# → data: {"event_type": "human_gate_opened", "gate": "merge_review", ...}
+# → data: {"event_type": "gate_red", "gate": "local_verify", "data": {"output": "..."}}
+# → data: {"event_type": "human_gate_pending", "gate": "merge_review", ...}
+# → data: {"event_type": "run_complete", "run_id": "abc-123", ...}
+```
+
+### Fetch an artifact
+
+The `{agent}` path parameter is the agent role name:
+
+| Agent | Returns |
+|---|---|
+| `bsa` | `{story: {title, acceptance_criteria, ...}}` |
+| `architect` | `{contract: "...", schema: "...", dag: {...}}` |
+| `planner` | `{plan: {tasks: [...], checklist: [...]}}` |
+| `developer` / `backend` / `frontend` | `{code: {"path/file.py": "content", ...}}` |
+| `security` | `{gate_status: "green/red", error: null}` |
+| `memory` | `{episodes_retrieved: [...], episodes_written: [...]}` |
+
+```bash
+curl http://localhost:8000/artifacts/abc-123/bsa
+# → {"run_id": "abc-123", "agent": "bsa", "story": {"title": "...", ...}}
+
+curl http://localhost:8000/artifacts/abc-123/architect
+# → {"run_id": "abc-123", "agent": "architect", "contract": "openapi: ...", "schema": "CREATE TABLE ..."}
 ```
 
 ### Approve a gate
