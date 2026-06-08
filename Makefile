@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 eval-baseline eval-ci eval-report run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -11,8 +11,12 @@ help:
 	@echo "  make services-down  — Stop the docker-compose services"
 	@echo "  make services-logs  — Tail docker-compose logs"
 	@echo "  make verify         — Run full verification (lint, type, test, offline)"
-	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only
-  make verify-m3      — Run M3 learning-lift demo (6/6)"
+	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only"
+	@echo "  make verify-m3      — Run M3 learning-lift demo (6/6)"
+	@echo "  make verify-m4      — Run M4 CI gate (must exit 0)"
+	@echo "  make eval-baseline  — Run full suite (20 cases), write baseline.json"
+	@echo "  make eval-ci        — Fast CI check (5 cases, block on regression)"
+	@echo "  make eval-report    — Full pass^k report (k=5, all 20 cases)"
 	@echo "  make run            — Build UI + start API (serves ui/dist at /)"
 	@echo "  make run-dev        — Start API only (use 'make ui-dev' in another terminal)"
 	@echo "  make ui-dev         — Start Vite dev server on :5173 (proxies API)"
@@ -67,6 +71,23 @@ verify-offline:
 verify-m3:
 	@echo "Running M3 learning-lift verification (6/6)..."
 	python scripts/verify_m3_learning.py
+
+verify-m4:
+	@echo "Running M4 CI gate..."
+	python evals/ci_gate.py
+
+eval-baseline:
+	@echo "Running full eval suite (20 cases, k=3) — writing baseline..."
+	python evals/pass_k_runner.py --k 3 --output baseline_full.json
+	python evals/ci_gate.py --update-baseline
+
+eval-ci:
+	@echo "Running CI eval gate (5 cases, k=3)..."
+	python evals/ci_gate.py
+
+eval-report:
+	@echo "Running full pass^k report (20 cases, k=5)..."
+	python evals/pass_k_runner.py --k 5
 
 ui-build:
 	cd ui && npm run build

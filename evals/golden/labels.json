@@ -1,0 +1,342 @@
+{
+  "crud-01": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 2,
+      "title_keywords": ["product", "list", "inventory"]
+    },
+    "contract": {
+      "must_have_paths": ["/products"],
+      "must_have_methods": ["get"]
+    },
+    "schema": {
+      "must_have_tables": ["products"]
+    },
+    "code": {
+      "min_files": 3
+    }
+  },
+  "crud-02": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 2,
+      "title_keywords": ["user", "profile"]
+    },
+    "contract": {
+      "must_have_paths": ["/users"],
+      "must_have_methods": ["get", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["users"]
+    },
+    "code": {
+      "min_files": 3
+    }
+  },
+  "crud-03": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 2,
+      "title_keywords": ["contact", "directory", "search"]
+    },
+    "contract": {
+      "must_have_paths": ["/contacts"],
+      "must_have_methods": ["get"]
+    },
+    "schema": {
+      "must_have_tables": ["contacts"]
+    },
+    "code": {
+      "min_files": 3
+    }
+  },
+  "crud-04": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 2,
+      "title_keywords": ["order", "history"]
+    },
+    "contract": {
+      "must_have_paths": ["/orders"],
+      "must_have_methods": ["get"]
+    },
+    "schema": {
+      "must_have_tables": ["orders"]
+    },
+    "code": {
+      "min_files": 3
+    }
+  },
+  "crud-05": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 2,
+      "title_keywords": ["inventory", "warehouse"]
+    },
+    "contract": {
+      "must_have_paths": ["/items"],
+      "must_have_methods": ["get", "post", "put", "delete"]
+    },
+    "schema": {
+      "must_have_tables": ["items"]
+    },
+    "code": {
+      "min_files": 3
+    }
+  },
+  "medium-01": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["dashboard", "sales", "revenue"]
+    },
+    "contract": {
+      "must_have_paths": ["/metrics", "/products"],
+      "must_have_methods": ["get"]
+    },
+    "schema": {
+      "must_have_tables": ["orders", "products"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-02": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["project", "task", "kanban"]
+    },
+    "contract": {
+      "must_have_paths": ["/projects", "/tasks"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["projects", "tasks"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-03": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["ticket", "support", "comment"]
+    },
+    "contract": {
+      "must_have_paths": ["/tickets"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["tickets", "comments"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-04": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["blog", "post", "search"]
+    },
+    "contract": {
+      "must_have_paths": ["/posts"],
+      "must_have_methods": ["get", "post", "put", "delete"]
+    },
+    "schema": {
+      "must_have_tables": ["posts", "tags"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-05": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["file", "storage", "folder"]
+    },
+    "contract": {
+      "must_have_paths": ["/files"],
+      "must_have_methods": ["get", "post", "delete"]
+    },
+    "schema": {
+      "must_have_tables": ["files", "folders"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-06": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["analytics", "metrics", "report"]
+    },
+    "contract": {
+      "must_have_paths": ["/metrics"],
+      "must_have_methods": ["get"]
+    },
+    "schema": {
+      "must_have_tables": ["events", "metrics"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "medium-07": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 3,
+      "title_keywords": ["booking", "calendar", "appointment"]
+    },
+    "contract": {
+      "must_have_paths": ["/bookings"],
+      "must_have_methods": ["get", "post", "delete"]
+    },
+    "schema": {
+      "must_have_tables": ["bookings", "slots"]
+    },
+    "code": {
+      "min_files": 4
+    }
+  },
+  "complex-01": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["tenant", "organisation", "role"]
+    },
+    "contract": {
+      "must_have_paths": ["/organisations", "/users"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["organisations", "users", "roles"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-02": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["document", "collaborative", "version"]
+    },
+    "contract": {
+      "must_have_paths": ["/documents"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["documents", "versions"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-03": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["order", "payment", "inventory"]
+    },
+    "contract": {
+      "must_have_paths": ["/orders", "/payments"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["orders", "payments", "inventory"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-04": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["recommendation", "user", "content"]
+    },
+    "contract": {
+      "must_have_paths": ["/recommendations", "/events"],
+      "must_have_methods": ["get", "post"]
+    },
+    "schema": {
+      "must_have_tables": ["events", "recommendations", "users"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-05": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["delivery", "tracking", "driver"]
+    },
+    "contract": {
+      "must_have_paths": ["/deliveries", "/drivers"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["deliveries", "drivers", "locations"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-06": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["pipeline", "deployment", "stage"]
+    },
+    "contract": {
+      "must_have_paths": ["/pipelines", "/runs"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["pipelines", "runs", "stages"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-07": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["ledger", "transaction", "account"]
+    },
+    "contract": {
+      "must_have_paths": ["/accounts", "/transactions"],
+      "must_have_methods": ["get", "post"]
+    },
+    "schema": {
+      "must_have_tables": ["accounts", "transactions", "entries"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  },
+  "complex-08": {
+    "story": {
+      "must_have_title": true,
+      "min_acceptance_criteria": 4,
+      "title_keywords": ["patient", "appointment", "health"]
+    },
+    "contract": {
+      "must_have_paths": ["/patients", "/appointments"],
+      "must_have_methods": ["get", "post", "put"]
+    },
+    "schema": {
+      "must_have_tables": ["patients", "appointments", "records"]
+    },
+    "code": {
+      "min_files": 5
+    }
+  }
+}

@@ -108,6 +108,44 @@ make ui-dev
 # → UI at http://localhost:5173 (proxies /run, /events, /artifacts to :8000)
 ```
 
+## Eval Harness (M4)
+
+The eval harness measures **pass^k reliability** — the fraction of golden cases where ALL k consecutive trials pass. A pipeline with 70% per-trial pass rate gets only ~34% on pass^3.
+
+### Golden dataset
+
+`evals/golden/requests.json` — 20 feature requests across three tiers (simple CRUD → medium → complex multi-tenant/real-time). `evals/golden/labels.json` specifies what a passing output looks like per case.
+
+### Scorer mix
+
+| Layer | Weight | What it checks |
+|---|---|---|
+| Deterministic | 60% | contract_valid, sast_clean, story_has_ac, dag_has_tasks, code_has_files, schema_has_tables |
+| LLM judge | 30% | Azure OpenAI rates story quality 1–5; offline heuristic fallback |
+| Human review | 10% | Items where judge and deterministic disagree are queued to `evals/results/human_queue.json` |
+
+### Commands
+
+```bash
+# First-time: run CI suite and write baseline (exits 0)
+make verify-m4
+
+# Subsequent: compare to baseline, exit 1 on any metric regressing >2pp
+make eval-ci
+
+# Full 20-case pass^k report (k=5, release gating)
+make eval-report
+
+# Re-baseline after intentional improvements
+python evals/ci_gate.py --update-baseline
+```
+
+### Regression blocking
+
+`evals/ci_gate.py` loads `evals/results/baseline.json`. If `det_weighted`, `per_trial_rate`, `pass_k_rate`, or `judge_avg` drops more than **2 percentage points** vs baseline → `exit(1)`. First run with no baseline writes it and exits 0.
+
+All eval commands work **offline** — no Azure credentials required.
+
 ## Project Structure
 
 See `Cowork-Project-Blueprint.md` for the full folder layout and M0–M5 breakdown.
