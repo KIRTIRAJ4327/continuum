@@ -456,6 +456,11 @@ async def _run_offline(
 ) -> dict:
     """Produce artifacts by calling the agent's primary skills directly."""
     if role == AgentRole.BSA.value:
+        # M3: GraphRAG — pull relevant past episodes to ground the story.
+        past_episodes = (
+            await _call(skills.get("graphrag_query"), ctx, state, query=state.request) or []
+        )
+
         ticket = await _call(skills.get("create_story"), ctx, state, request=state.request) or {}
         story = {
             "title": _title_from_request(state.request),
@@ -464,7 +469,11 @@ async def _run_offline(
             "ticket": ticket,
         }
         spec = await _call(skills.get("write_spec"), ctx, state, request=state.request, story=story) or {}
-        return {"story": story, "spec": spec}
+        result: Dict[str, Any] = {"story": story, "spec": spec}
+        if past_episodes:
+            result["episodes"] = past_episodes
+            logger.info("[BSA] Grounded on %d past episode(s) via GraphRAG", len(past_episodes))
+        return result
 
     if role == AgentRole.ARCHITECT.value:
         story = state.story or {}
@@ -565,6 +574,42 @@ async def _run_offline(
         sast = await _call(skills.get("run_sast"), ctx, state, code_path=ctx.repo_path) or {}
         return {"issues": sast.get("issues", []), "pass": bool(sast.get("clean", True))}
 
+    # M3: Memory agent — write episode summarising the completed run.
+    if role == AgentRole.MEMORY.value:
+        feature_id = (state.dag or {}).get("dag_id") or state.run_id or "offline"
+        story_id = (state.story or {}).get("ticket", {}).get("story_id", "")
+        outcome = "completed" if not state.error_message else f"failed: {state.error_message}"
+
+        # Gate summary for the outcome field.
+        gate_summary = "; ".join(
+            f"{g.name}={g.status}" + (f"(retry={g.retry_count})" if g.retry_count else "")
+            for g in state.gates
+        )
+        if gate_summary:
+            outcome = f"{outcome} | gates: {gate_summary}"
+
+        # Files touched (entities).
+        entities = [
+            {"name": f, "type": "file"}
+            for f in list((state.code or {}).keys())[:20]  # cap at 20 to avoid huge payloads
+        ]
+
+        ep = await _call(
+            skills.get("write_episode"),
+            ctx,
+            state,
+            feature_id=feature_id,
+            agent="pipeline",
+            decision=f"Implemented: {state.request[:200]}",
+            action="ran_pipeline",
+            outcome=outcome,
+            request_text=state.request,
+            story_id=story_id,
+            entities=entities,
+        ) or {}
+
+        return {"episode": ep, "episodes_written": 1}
+
     return {}
 
 
@@ -605,6 +650,9 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
             if data.get("spec"):
                 story["spec"] = data["spec"]
             state.story = story
+        # M3: store past episodes retrieved by GraphRAG.
+        if data.get("episodes") is not None:
+            state.episodes = data["episodes"]
 
     elif role == AgentRole.ARCHITECT.value:
         contract = data.get("contract")
@@ -652,6 +700,12 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
             "green" if sec_pass else "red",
             None if sec_pass else str(data.get("issues", [])),
         )
+
+    elif role == AgentRole.MEMORY.value:
+        # M3: accumulate episodes written by the Memory agent.
+        if data.get("episode"):
+            state.episodes_written = list(state.episodes_written or [])
+            state.episodes_written.append(data["episode"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1083,5 +1137,6 @@ def _artifact_summary(role: str, state: ContinuumState) -> List[str]:
         AgentRole.PLANNER.value:   ["dag.plan"],
         AgentRole.DEVELOPER.value: ["code"],
         AgentRole.SECURITY.value:  ["gates.security_sast"],
+        AgentRole.MEMORY.value:    ["episodes_written"],
     }
     return mapping.get(role, [])

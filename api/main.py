@@ -80,6 +80,8 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "merge_approved": state.merge_approved,
         "error_message": state.error_message,
         "messages": len(state.messages),
+        "episodes": len(state.episodes or []),
+        "episodes_written": len(state.episodes_written or []),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -163,6 +165,13 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     if lv is None or lv.status == "green":
         await _run("security")
 
+    # 4. M3: Memory agent — write episode regardless of gate outcomes so future
+    #    runs can learn from both successes and failures.
+    try:
+        await _run("memory")
+    except Exception as mem_exc:  # noqa: BLE001
+        logger.warning("Memory agent failed (non-fatal): %s", mem_exc)
+
     state.completed_at = time.time()
 
     if run_id:
@@ -170,7 +179,10 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             "event_type": "run_complete",
             "agent": "",
             "run_id": run_id,
-            "data": {"status": _classify(state)},
+            "data": {
+                "status": _classify(state),
+                "episodes_written": len(state.episodes_written or []),
+            },
         })
 
 
@@ -302,6 +314,11 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
         artifacts = {
             "gate_status": sec_gate.status if sec_gate else "unknown",
             "error": sec_gate.error_message if sec_gate else None,
+        }
+    elif role == AgentRole.MEMORY.value:
+        artifacts = {
+            "episodes_retrieved": state.episodes or [],
+            "episodes_written": state.episodes_written or [],
         }
     else:
         raise HTTPException(status_code=404, detail=f"unknown agent '{agent}'")

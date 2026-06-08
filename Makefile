@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline run run-dev ui-dev ui-build test clean services services-down services-logs
+.PHONY: help install install-ui verify verify-offline verify-m3 run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -10,7 +10,8 @@ help:
 	@echo "  make services-down  — Stop the docker-compose services"
 	@echo "  make services-logs  — Tail docker-compose logs"
 	@echo "  make verify         — Run full verification (lint, type, test, offline)"
-	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only"
+	@echo "  make verify-offline — Run 11/11 + 3/3 offline checks only
+  make verify-m3      — Run M3 learning-lift demo (6/6)"
 	@echo "  make run            — Build UI + start API (serves ui/dist at /)"
 	@echo "  make run-dev        — Start API only (use 'make ui-dev' in another terminal)"
 	@echo "  make ui-dev         — Start Vite dev server on :5173 (proxies API)"
@@ -46,6 +47,10 @@ verify-offline:
 	@echo "Running offline verification (11/11 + 3/3)..."
 	python scripts/verify_agent_core.py
 	python scripts/verify_m0_loop.py
+
+verify-m3:
+	@echo "Running M3 learning-lift verification (6/6)..."
+	python scripts/verify_m3_learning.py
 
 ui-build:
 	cd ui && npm run build
