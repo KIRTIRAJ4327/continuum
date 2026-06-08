@@ -146,6 +146,46 @@ python evals/ci_gate.py --update-baseline
 
 All eval commands work **offline** — no Azure credentials required.
 
+## Evolution Agent (M5)
+
+The Evolution Agent closes the self-improvement loop: it observes pipeline telemetry, diagnoses recurring failure patterns, proposes targeted harness fixes, and surfaces them for human promotion. It is itself subject to Rule 9 — **no proposal is ever auto-applied**.
+
+### How it works
+
+1. **Observe** — scans the in-memory event bus for gate failures, retry spikes, and escalations.
+2. **Diagnose** — classifies each pattern: `prompt_issue` / `gate_too_strict` / `skill_gap` / `routing_error`.
+3. **Propose** — generates a concrete `{type, file, before, after, rationale}` diff and writes it to `evolution/proposals/pending/`.
+4. **Evaluate** — scores the proposal with a fast heuristic (offline) or the full CI suite (live); proposals that would regress any metric are auto-rejected.
+5. **Promote** — `human_promote(proposal_id)` is the **only code path that modifies the harness**. It applies the diff, runs `verify-offline`, and commits to `evolution/proposals/applied/` on success.
+
+### Commands
+
+```bash
+# Print current failure patterns from event history
+make evo-observe
+
+# Generate + evaluate a proposal, write to evolution/proposals/pending/
+make evo-propose
+
+# List pending proposals
+make evo-promote
+
+# Apply a specific proposal (human-gated — verify-offline runs automatically):
+python -c "from evolution.promoter import human_promote; human_promote('<proposal-id>')"
+```
+
+### Dynamic decomposition
+
+When the Planner produces a DAG with ≥ 5 tasks, `orchestrator/decomposer.py` generates a deterministic Python orchestration script (max 4 parallel slots, 50k token budget) stored in `state.decomposition_script` for operator use.
+
+### Verification
+
+```bash
+make verify-m5   # 6/6 checks: observe → diagnose → propose → evaluate → pending → promote
+```
+
+All M5 commands work **offline** — no Azure credentials or Neo4j required.
+
 ## Project Structure
 
 See `Cowork-Project-Blueprint.md` for the full folder layout and M0–M5 breakdown.
