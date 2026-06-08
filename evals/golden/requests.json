@@ -1,0 +1,102 @@
+[
+  {
+    "id": "crud-01",
+    "tier": "simple",
+    "request": "Build a products list page that shows name, price, and stock count for each product"
+  },
+  {
+    "id": "crud-02",
+    "tier": "simple",
+    "request": "Create a user profile page where users can view and edit their name, email, and avatar"
+  },
+  {
+    "id": "crud-03",
+    "tier": "simple",
+    "request": "Add a contacts directory with search by name and department filter"
+  },
+  {
+    "id": "crud-04",
+    "tier": "simple",
+    "request": "Build an order history table that lists past orders with status, total, and date"
+  },
+  {
+    "id": "crud-05",
+    "tier": "simple",
+    "request": "Create an inventory management screen for adding, editing, and deleting warehouse items"
+  },
+  {
+    "id": "medium-01",
+    "tier": "medium",
+    "request": "Build a sales dashboard with revenue chart, top products list, and date range filter"
+  },
+  {
+    "id": "medium-02",
+    "tier": "medium",
+    "request": "Create a project tracker with kanban board, assignee filter, and priority sorting"
+  },
+  {
+    "id": "medium-03",
+    "tier": "medium",
+    "request": "Build a support ticket system with status workflow, priority labels, and comment threads"
+  },
+  {
+    "id": "medium-04",
+    "tier": "medium",
+    "request": "Create a blog platform with markdown editor, tag taxonomy, and full-text search"
+  },
+  {
+    "id": "medium-05",
+    "tier": "medium",
+    "request": "Build a file storage service with folder hierarchy, preview thumbnails, and share links"
+  },
+  {
+    "id": "medium-06",
+    "tier": "medium",
+    "request": "Create an analytics dashboard with filterable metrics, CSV export, and scheduled email reports"
+  },
+  {
+    "id": "medium-07",
+    "tier": "medium",
+    "request": "Build a booking calendar that prevents double-booking and sends email confirmations"
+  },
+  {
+    "id": "complex-01",
+    "tier": "complex",
+    "request": "Build a multi-tenant SaaS platform where each organisation has isolated data, custom roles, and their own subdomain"
+  },
+  {
+    "id": "complex-02",
+    "tier": "complex",
+    "request": "Create a real-time collaborative document editor with presence indicators, conflict-free merging, and version history"
+  },
+  {
+    "id": "complex-03",
+    "tier": "complex",
+    "request": "Build an event-driven order processing system with inventory reservation, payment gateway integration, and webhook notifications"
+  },
+  {
+    "id": "complex-04",
+    "tier": "complex",
+    "request": "Create a recommendation engine that tracks user behaviour, trains nightly, and surfaces personalised content"
+  },
+  {
+    "id": "complex-05",
+    "tier": "complex",
+    "request": "Build a geospatial delivery tracking system with live driver location, ETA calculation, and customer SMS updates"
+  },
+  {
+    "id": "complex-06",
+    "tier": "complex",
+    "request": "Create a CI/CD pipeline orchestrator that runs parallel test stages, gates on coverage, and auto-rolls back failing deploys"
+  },
+  {
+    "id": "complex-07",
+    "tier": "complex",
+    "request": "Build a financial ledger with double-entry bookkeeping, audit trail, currency conversion, and regulatory reporting"
+  },
+  {
+    "id": "complex-08",
+    "tier": "complex",
+    "request": "Create a healthcare patient portal with appointment scheduling, lab result display, and HIPAA-compliant secure messaging"
+  }
+]
