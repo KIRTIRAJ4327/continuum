@@ -1,6 +1,7 @@
 # File: continuum/orchestrator/state.py
 # UPDATED: M3 — added episodic memory fields (episodes, episodes_written)
 # UPDATED: M6 — added run_status, cost_usd, reject_reason (Work Queue + metrics)
+# UPDATED: M7 — added business_mappings, mapping_fidelity (Scope-Guard)
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
@@ -100,6 +101,13 @@ class ContinuumState:
     cost_usd: float = 0.0
     # Reason captured when a human rejects a story/design gate (run_status="returned").
     reject_reason: Optional[str] = None
+
+    # M7: Mapping Fidelity (Scope-Guard, D11)
+    # Business mappings supplied at intent time: [{code: "BR", label: "Branch"}, ...]
+    business_mappings: List[Dict[str, Any]] = field(default_factory=list)
+    # Populated by gate_scope_conformance after the developer chain runs.
+    # Shape: {supplied, found, extra_in_code, missing_in_code, exact_match}
+    mapping_fidelity: Optional[Dict[str, Any]] = None
 
     # Metadata
     run_id: Optional[str] = None

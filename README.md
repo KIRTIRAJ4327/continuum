@@ -32,7 +32,8 @@
 [![CI Gate](https://img.shields.io/badge/CI_Gate-PASS-22C55E?style=flat-square&logo=github-actions&logoColor=white)]()
 [![Evolution Tests](https://img.shields.io/badge/Evolution_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Work Queue Tests](https://img.shields.io/badge/WorkQueue_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M6_Complete-7C3AED?style=flat-square)]()
+[![Scope Guard Tests](https://img.shields.io/badge/ScopeGuard_Tests-2%2F2_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M7_Complete-7C3AED?style=flat-square)]()
 
 </div>
 
@@ -325,7 +326,7 @@ Evidence Stack (independent ground truth, per run):
   1. Build / compile        ← local_verify (ruff + mypy + py_compile)
   2. Regression suite       ← local_verify (pytest)
   3. Acceptance-criteria    ← contract_validate
-  4. Scope conformance      ← stub today; wired to mapping fidelity in M7
+  4. Scope conformance      ← mapping_fidelity.exact_match (M7 Scope-Guard)
   5. Lint + secret scan     ← security_sast
   6. Human review           ← story / design / merge approvals
 ```
@@ -343,6 +344,39 @@ Evidence Stack (independent ground truth, per run):
 New API: `POST /run/{id}/reject` · `POST /run/{id}/escalate-resolve` ·
 `GET /runs/{id}/evidence`. New events: `run_blocked` · `run_returned`.
 Proven offline in `scripts/verify_m6_workqueue.py` → 6/6 PASS.
+
+---
+
+## 🗺️ Mapping Fidelity / Scope-Guard (M7)
+
+Business-to-code traceability enforced post-implementation (D11 shield).
+
+```
+Intent time:    POST /run   {"request": "...", "business_mappings": [{"code": "BR", "label": "Branch"}]}
+                                                          │
+After dev chain runs:                                     │
+  gate_scope_conformance(state) scans state.code ─────────┘
+    ├─ finds {"BR": "Branch"} in generated dict         → exact_match=True → GREEN
+    └─ finds {"BR": "Branch", "EXTRA": "?"}              → extra_in_code   → RED → BLOCKED
+                                                                                    (no auto-retry)
+
+state.mapping_fidelity = {
+  supplied: ["BR"],  found: ["BR"],  extra_in_code: [],  missing_in_code: [],  exact_match: True
+}
+```
+
+- **`skills/scope_guard/v1.0/skill.py`** — pure offline skill; scans code for
+  string literals matching ALL_CAPS mapping-code patterns in dict-key position.
+- **`orchestrator/gates.py::gate_scope_conformance`** — side-effect: sets
+  `state.mapping_fidelity` for Evidence Stack layer 4 + UI.
+- **`POST /run` extended** — optional `business_mappings: [{code, label}]` stored
+  on state; gate skips gracefully when empty.
+- **Evidence Stack layer 4** — was a stub in M6; now driven by
+  `state.mapping_fidelity.exact_match`.
+- **UI** — `WorkQueue` new-run form has a collapsible business-mappings table;
+  `MappingFidelity.tsx` shows supplied-vs-found in the Evidence tab.
+
+Proven offline in `scripts/verify_m7_scope_guard.py` → 2/2 PASS.
 
 ---
 
@@ -368,7 +402,10 @@ M5 ──── Evolution Agent · bounded dynamic decomposition
   │     PR #8  ✅  observe→propose→human-promote · 6/6 PASS
   │
 M6 ──── Work Queue UI · 6-layer Evidence Stack · run metrics
-        ✅  run_status lifecycle · cost + lead-time · blocked/returned · 6/6 PASS
+  │     ✅  run_status lifecycle · cost + lead-time · blocked/returned · 6/6 PASS
+  │
+M7 ──── Mapping Fidelity · D11 Scope-Guard
+        ✅  business_mappings enforced post-implementation · 2/2 PASS
 ```
 
 ---
@@ -444,6 +481,7 @@ make verify-m3        # learning lift (run N+1 > run N)
 make verify-m4        # eval CI gate (regression blocking)
 make verify-m5        # evolution agent (governed harness mutation)
 make verify-m6        # work queue + evidence stack + run metrics
+make verify-m7        # mapping fidelity / scope-guard
 ```
 
 | Script | Checks | Result |
@@ -454,8 +492,9 @@ make verify-m6        # work queue + evidence stack + run metrics
 | `evals/ci_gate.py` | stable vs baseline · regression detection | PASS ✅ |
 | `scripts/verify_m5_evolution.py` | observe · diagnose · propose · eval · promote | 6/6 ✅ |
 | `scripts/verify_m6_workqueue.py` | cost accrual · run_status · reject · blocked · evidence | 6/6 ✅ |
+| `scripts/verify_m7_scope_guard.py` | exact match → green · extra code → red/blocked | 2/2 ✅ |
 
-> All 6 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
+> All 7 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
 
 ---
 
@@ -507,6 +546,7 @@ continuum/
 ├── ui/                    # React 18 + React Flow + Tailwind + Vite
 │   └── src/components/    #   WorkQueue · Spine · AgentGraph · ActivityStream
 │                          #   GateInbox · ArtifactViewer · EvidenceStack · RunMetrics
+│                          #   MappingFidelity (M7)
 ├── api/                   # FastAPI: /run · /events (SSE) · /artifacts · /resume
 │                          #   M6: /reject · /escalate-resolve · /runs/{id}/evidence
 ├── scripts/               # Verification scripts for each milestone

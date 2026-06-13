@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from orchestrator.agent_runner import AgentContext, run_agent
 from orchestrator.events import event_bus
+from orchestrator.gates import gate_scope_conformance, update_gate_status
 from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
 
@@ -82,6 +83,9 @@ _MAX_RETRIES = 3
 # --------------------------------------------------------------------------- #
 class FeatureRequest(BaseModel):
     request: str
+    # M7: optional business mappings supplied at intent time (e.g. [{code:"BR", label:"Branch"}]).
+    # Stored on the run state so gate_scope_conformance can enforce them post-implementation.
+    business_mappings: List[Dict[str, str]] = []
 
 
 class RejectRequest(BaseModel):
@@ -148,6 +152,8 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "stage_idx": _stage_idx(state),
         "stage_count": _STAGE_COUNT,
         "reject_reason": state.reject_reason,
+        "business_mappings": getattr(state, "business_mappings", []) or [],
+        "mapping_fidelity": getattr(state, "mapping_fidelity", None),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -207,6 +213,7 @@ def _run_summary(state: ContinuumState) -> Dict[str, Any]:
         "started_at": state.started_at,
         "completed_at": state.completed_at,
         "current_agent": state.current_agent.value if state.current_agent else None,
+        "reject_reason": getattr(state, "reject_reason", None),
     }
 
 
@@ -293,6 +300,30 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             })
         logger.warning("local_verify red, retry %d/%d", gate.retry_count, _MAX_RETRIES)
 
+    # 2.5: M7 Scope-Guard gate — only when business_mappings were supplied and
+    # the developer chain succeeded (local_verify green or absent).
+    bm = getattr(state, "business_mappings", []) or []
+    if bm:
+        lv_check = _gate(state, "local_verify")
+        if lv_check is None or lv_check.status == "green":
+            sc_passed, sc_output = await gate_scope_conformance(state)
+            update_gate_status(state, "scope_conformance", sc_passed, sc_output)
+            if not sc_passed:
+                # Scope mismatch → blocked (no auto-retry, per M7 spec).
+                await _mark_blocked(state, "scope_conformance", sc_output, run_id)
+                if run_id:
+                    await event_bus.emit(run_id, {
+                        "event_type": "human_gate_pending",
+                        "agent": "developer",
+                        "run_id": run_id,
+                        "data": {
+                            "gate_name": "scope_conformance",
+                            "reason": "mapping_mismatch",
+                        },
+                    })
+                logger.error("scope_conformance gate red — blocking run %s", run_id)
+                return
+
     # 3. Security (only when local_verify is green)
     lv = _gate(state, "local_verify")
     if lv is None or lv.status == "green":
@@ -335,7 +366,12 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="request is empty")
 
     run_id = uuid.uuid4().hex[:12]
-    state = ContinuumState(request=req.request, run_id=run_id, started_at=time.time())
+    state = ContinuumState(
+        request=req.request,
+        run_id=run_id,
+        started_at=time.time(),
+        business_mappings=req.business_mappings,  # M7: scope-guard input
+    )
     _RUNS[run_id] = state
 
     # Background task — emits events as each agent completes.
