@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { PendingGate } from '../types';
-import { resumeRun } from '../lib/api';
+import { resumeRun, rejectRun } from '../lib/api';
 
 interface Props {
   pendingGates: PendingGate[];
@@ -31,22 +31,46 @@ interface CardProps {
   onResolved: (gateName: string, approved: boolean) => void;
 }
 
+// Gates that can be sent back to their author with a reason (M6 reject path).
+const RETURNABLE = new Set(['story_review', 'design_review']);
+
 function GateCard({ gate, onResolved }: CardProps) {
   const [loading, setLoading] = useState<'approve' | 'reject' | null>(null);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState('');
   const meta = GATE_DESCRIPTIONS[gate.gate_name] ?? {
     title:       gate.gate_name,
     description: 'Human review required before continuing.',
   };
+  const canReturn = RETURNABLE.has(gate.gate_name);
 
-  async function handle(approved: boolean) {
-    setLoading(approved ? 'approve' : 'reject');
+  async function approve() {
+    setLoading('approve');
     try {
-      await resumeRun(gate.run_id, approved);
-      onResolved(gate.gate_name, approved);
+      await resumeRun(gate.run_id, true);
+      onResolved(gate.gate_name, true);
     } catch (err) {
       console.error('Resume failed', err);
     } finally {
       setLoading(null);
+    }
+  }
+
+  async function confirmReject() {
+    setLoading('reject');
+    try {
+      if (canReturn) {
+        await rejectRun(gate.run_id, gate.gate_name, reason.trim());
+      } else {
+        // Non-returnable gate (e.g. local_verify): fall back to a plain reject.
+        await resumeRun(gate.run_id, false);
+      }
+      onResolved(gate.gate_name, false);
+    } catch (err) {
+      console.error('Reject failed', err);
+    } finally {
+      setLoading(null);
+      setRejecting(false);
     }
   }
 
@@ -63,25 +87,60 @@ function GateCard({ gate, onResolved }: CardProps) {
 
       <p className="text-xs text-slate-400 leading-relaxed">{meta.description}</p>
 
+      {/* Reject reason capture */}
+      {rejecting && (
+        <textarea
+          autoFocus
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          rows={2}
+          placeholder={canReturn ? 'Why is this being returned? (sent to the author)' : 'Optional note'}
+          className="w-full bg-[#1e2535] border border-rose-500/40 rounded-lg p-2 text-xs
+                     text-slate-200 placeholder-slate-600 resize-none focus:outline-none
+                     focus:border-rose-500 transition-colors"
+        />
+      )}
+
       {/* Actions */}
-      <div className="flex gap-2 pt-1">
-        <button
-          onClick={() => handle(true)}
-          disabled={loading !== null}
-          className="flex-1 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40
-                     text-xs font-semibold text-white transition-colors"
-        >
-          {loading === 'approve' ? 'Approving…' : '✓  Approve'}
-        </button>
-        <button
-          onClick={() => handle(false)}
-          disabled={loading !== null}
-          className="flex-1 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40
-                     text-xs font-semibold text-slate-300 transition-colors"
-        >
-          {loading === 'reject' ? 'Rejecting…' : '✗  Reject'}
-        </button>
-      </div>
+      {!rejecting ? (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={approve}
+            disabled={loading !== null}
+            className="flex-1 py-2 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40
+                       text-xs font-semibold text-white transition-colors"
+          >
+            {loading === 'approve' ? 'Approving…' : '✓  Approve'}
+          </button>
+          <button
+            onClick={() => setRejecting(true)}
+            disabled={loading !== null}
+            className="flex-1 py-2 rounded-lg bg-red-900 hover:bg-red-800 disabled:opacity-40
+                       text-xs font-semibold text-slate-300 transition-colors"
+          >
+            {canReturn ? '↩  Return' : '✗  Reject'}
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={confirmReject}
+            disabled={loading !== null || (canReturn && !reason.trim())}
+            className="flex-1 py-2 rounded-lg bg-rose-800 hover:bg-rose-700 disabled:opacity-40
+                       text-xs font-semibold text-white transition-colors"
+          >
+            {loading === 'reject' ? 'Sending…' : 'Confirm'}
+          </button>
+          <button
+            onClick={() => { setRejecting(false); setReason(''); }}
+            disabled={loading !== null}
+            className="flex-1 py-2 rounded-lg bg-[#1e2535] hover:bg-[#252d40] disabled:opacity-40
+                       text-xs font-semibold text-slate-400 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }

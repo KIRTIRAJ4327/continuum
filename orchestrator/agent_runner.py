@@ -50,6 +50,21 @@ _SKILLS_DIR = _ROOT / "skills"
 # Max LLM<->tool round-trips before we force a final answer.
 MAX_TOOL_ITERS = 5
 
+# --------------------------------------------------------------------------- #
+# M6: cost accounting
+# --------------------------------------------------------------------------- #
+# Fixed per-agent estimate used on the offline path (no LLM call is made, so
+# there is no real token usage). Keeps state.cost_usd populated so the Work
+# Queue / RunMetrics never show a blank cost. Pure bookkeeping — only ever adds.
+_OFFLINE_COST_PER_AGENT = 0.02
+
+# Per-1K-token pricing by model tier (USD). Best-effort; used only when a live
+# response surfaces token usage. Values are deliberately conservative defaults.
+_PRICING_PER_1K = {
+    "strong": {"prompt": 0.005, "completion": 0.015},
+    "cheap":  {"prompt": 0.0005, "completion": 0.0015},
+}
+
 # Parameters that are injected from the run context, never requested from the LLM.
 _INJECTED_PARAMS = {
     "neo4j_driver",
@@ -207,7 +222,6 @@ def resolve_model(spec: dict) -> Optional[Any]:
     try:
         # langchain-azure-ai 1.2.x preferred import path
         from langchain_azure_ai.chat_models import AzureChatCompletions  # type: ignore[import]
-        from langchain.chat_models import init_chat_model  # always available in langchain>=0.3
 
         endpoint = _azure_endpoint()
         api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -430,7 +444,8 @@ async def _run_llm(
 
         if not tool_calls:
             # Clean final answer
-            return _parse_json(getattr(response, "content", "") or "")
+            parsed = _parse_json(getattr(response, "content", "") or "")
+            return _attach_usage(parsed, response)
 
         # Execute tool calls; errors become ToolMessage content so LLM can react
         for call in tool_calls:
@@ -454,7 +469,27 @@ async def _run_llm(
 
     # Loop exhausted — extract best-effort answer from last response
     logger.warning("[LLM] Tool loop exhausted after %d iterations — forcing final parse", MAX_TOOL_ITERS)
-    return _parse_json(getattr(response, "content", "") or "")
+    return _attach_usage(_parse_json(getattr(response, "content", "") or ""), response)
+
+
+def _attach_usage(parsed: dict, response: Any) -> dict:
+    """
+    Stash token usage from a LangChain response under a private key (M6).
+
+    run_agent() pops `__usage__` before applying agent output and feeds it to
+    _accrue_cost(). Returns `parsed` unchanged when no usage is exposed, so the
+    offline path (which never calls this) is unaffected.
+    """
+    try:
+        meta = getattr(response, "response_metadata", None) or {}
+        usage = meta.get("token_usage") or meta.get("usage")
+        if not usage:
+            usage = getattr(response, "usage_metadata", None)
+        if usage:
+            parsed.setdefault("__usage__", usage)
+    except Exception:  # noqa: BLE001
+        pass
+    return parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -678,6 +713,40 @@ def _set_gate(state: ContinuumState, name: str, status: str, error: Optional[str
     gate.status = status
     gate.error_message = error
     gate.last_checked = time.time()
+
+
+def _accrue_cost(state: ContinuumState, spec: dict, usage: Optional[Dict[str, Any]]) -> None:
+    """
+    Add this agent run's estimated model cost to state.cost_usd (M6).
+
+    - Offline (usage is None / empty): add a fixed per-agent estimate so the
+      field is always populated without any LLM call.
+    - Live: if a token-usage dict is present, price prompt/completion tokens by
+      the agent's model tier; otherwise fall back to the fixed estimate.
+
+    Must never raise — cost tracking is non-essential and must not break a run.
+    """
+    try:
+        if not usage:
+            state.cost_usd = round(state.cost_usd + _OFFLINE_COST_PER_AGENT, 6)
+            return
+        tier = spec.get("model_tier", "strong")
+        rates = _PRICING_PER_1K.get(tier, _PRICING_PER_1K["strong"])
+        prompt_tokens = float(
+            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        )
+        completion_tokens = float(
+            usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        )
+        cost = (
+            prompt_tokens / 1000.0 * rates["prompt"]
+            + completion_tokens / 1000.0 * rates["completion"]
+        )
+        if cost <= 0:
+            cost = _OFFLINE_COST_PER_AGENT
+        state.cost_usd = round(state.cost_usd + cost, 6)
+    except Exception:  # noqa: BLE001 — cost accounting must never crash a run
+        state.cost_usd = round(state.cost_usd + _OFFLINE_COST_PER_AGENT, 6)
 
 
 def _files_from(value: Any) -> Dict[str, str]:
@@ -1153,6 +1222,11 @@ async def run_agent(
             logger.error("[%s] Offline fallback also failed: %s", role.upper(), exc2)
             state.error_message = f"{role} failed: {exc2}"
             data = {}
+
+    # M6: account for model cost before merging output (pop the private usage
+    # key so it never leaks into apply_agent_output / artifacts).
+    usage = data.pop("__usage__", None) if isinstance(data, dict) else None
+    _accrue_cost(state, spec, usage)
 
     apply_agent_output(state, role, data)
     state.current_agent = AgentRole(role)

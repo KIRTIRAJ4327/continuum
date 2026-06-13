@@ -5,14 +5,13 @@
 LangGraph supervisor orchestrator for Continuum.
 Handles routing, gating, retry logic, and state management.
 """
-import asyncio
 import logging
 import time
 from typing import Callable, Optional
 
 from langgraph.graph import StateGraph, START, END
 
-from .state import ContinuumState, AgentRole, GateStatus
+from .state import ContinuumState, AgentRole
 from .agent_runner import AgentContext, run_agent
 
 logger = logging.getLogger(__name__)

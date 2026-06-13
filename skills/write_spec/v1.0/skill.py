@@ -75,9 +75,9 @@ def _derive_spec(request: str, title: str) -> Dict[str, Any]:
     functional: List[str] = [
         f"Users shall be able to view a {title.lower()}.",
         f"The system shall support creating, reading, updating, and deleting {resource_pl}.",
-        f"The system shall return paginated results for list endpoints (default page size: 20).",
-        f"All mutating operations shall require authentication.",
-        f"The system shall emit audit log entries for all write operations.",
+        "The system shall return paginated results for list endpoints (default page size: 20).",
+        "All mutating operations shall require authentication.",
+        "The system shall emit audit log entries for all write operations.",
     ]
     non_functional = [
         {"area": "Performance", "requirement": "p99 API response time < 300 ms under 1 000 rps"},

@@ -18,8 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -83,9 +81,6 @@ def _heuristic_evaluate(proposal: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _run_ci_suite() -> Dict[str, float]:
     """Run the real CI gate and return the current metric snapshot."""
-    import asyncio
-    import sys
-    import io
 
     # Import ci_gate lazily so this module loads offline.
     ci_gate_path = _ROOT / "evals" / "ci_gate.py"

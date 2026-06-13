@@ -12,7 +12,6 @@ Permission tiers:
 """
 
 from enum import Enum
-from typing import Optional
 
 class PermissionTier(str, Enum):
     """Permission tiers for agent operations."""

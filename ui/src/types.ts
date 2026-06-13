@@ -7,7 +7,9 @@ export type EventType =
   | 'gate_retry'
   | 'human_gate_pending'
   | 'human_gate_resolved'
-  | 'run_complete';
+  | 'run_complete'
+  | 'run_blocked'      // M6: gate stayed red past max retries
+  | 'run_returned';    // M6: human rejected a story/design gate
 
 export interface AgentEvent {
   event_type: EventType;
@@ -17,16 +19,39 @@ export interface AgentEvent {
   data: Record<string, unknown>;
 }
 
-// ─── Run status ───────────────────────────────────────────────────────────────
-export type RunStatus = 'running' | 'complete' | 'failed' | 'awaiting_approval';
+// ─── Run status (M6 canonical vocabulary) ────────────────────────────────────
+export type RunStatus =
+  | 'running'
+  | 'waiting_gate'
+  | 'blocked'
+  | 'returned'
+  | 'done'
+  | 'failed';
 
 export interface RunSummary {
   run_id: string;
   request: string;
   status: RunStatus;
+  // M6 metrics
+  run_status?: RunStatus;
+  cost_usd?: number;
+  duration_s?: number | null;
+  stage_idx?: number;
+  stage_count?: number;
+  reject_reason?: string | null;
   started_at: number | null;
   completed_at: number | null;
   current_agent: string | null;
+}
+
+// ─── M6: one row of the 6-layer Evidence Stack ───────────────────────────────
+export type EvidenceStatus = 'pass' | 'fail' | 'pending';
+
+export interface EvidenceLayer {
+  layer: string;
+  sublabel?: string;
+  status: EvidenceStatus;
+  detail: string;
 }
 
 // ─── Agent node status derived from events ───────────────────────────────────

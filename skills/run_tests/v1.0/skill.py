@@ -10,11 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 

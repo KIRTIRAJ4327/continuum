@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from orchestrator.agent_runner import AgentContext, run_agent
 from orchestrator.events import event_bus
 from orchestrator.state import AgentRole, ContinuumState
+from evals.evidence_stack import build_evidence_stack
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,35 @@ class FeatureRequest(BaseModel):
     request: str
 
 
+class RejectRequest(BaseModel):
+    """Body for POST /run/{run_id}/reject — return a story/design gate to the author."""
+    gate: str           # "story_review" | "design_review"
+    reason: str = ""
+
+
+# M6: canonical run-lifecycle vocabulary surfaced to the Work Queue UI.
+#   running | waiting_gate | blocked | returned | done | failed
+# These are authoritative when set on the state; "running" falls back to the
+# legacy derivation in _classify().
+_EXPLICIT_STATES = {"waiting_gate", "blocked", "returned", "done", "failed"}
+
+# Canonical stage ordering for the Work Queue progress indicator. The live
+# pipeline runs `developer` as a single stage; it is mapped onto the backend
+# slot so the index lands in the implementation band of the 8-stage spine.
+_STAGE_INDEX: Dict[str, int] = {
+    "bsa": 0,
+    "architect": 1,
+    "planner": 2,
+    "database": 3,
+    "backend": 4,
+    "developer": 4,
+    "frontend": 5,
+    "security": 6,
+    "memory": 7,
+}
+_STAGE_COUNT = 8
+
+
 def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
     """Serialise state for JSON responses."""
     return {
@@ -112,6 +142,12 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "messages": len(state.messages),
         "episodes": len(state.episodes or []),
         "episodes_written": len(state.episodes_written or []),
+        "run_status": _classify(state),
+        "cost_usd": round(getattr(state, "cost_usd", 0.0), 4),
+        "duration_s": _duration_s(state),
+        "stage_idx": _stage_idx(state),
+        "stage_count": _STAGE_COUNT,
+        "reject_reason": state.reject_reason,
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -122,13 +158,76 @@ def _gate(state: ContinuumState, name: str) -> Optional[Any]:
 
 
 def _classify(state: ContinuumState) -> str:
+    """
+    Map a run onto the canonical M6 vocabulary.
+
+    Prefers state.run_status when it carries an explicit (non-"running") value;
+    otherwise derives from the legacy flags so older code paths still classify.
+    Note: the M6 vocabulary renames the old `awaiting_approval` → `waiting_gate`
+    and `complete` → `done`.
+    """
+    rs = getattr(state, "run_status", "") or ""
+    if rs in _EXPLICIT_STATES:
+        return rs
     if state.human_approval_pending:
-        return "awaiting_approval"
+        return "waiting_gate"
     if state.error_message:
         return "failed"
     if state.completed_at:
-        return "complete"
+        return "done"
     return "running"
+
+
+def _duration_s(state: ContinuumState) -> Optional[float]:
+    """Lead time in seconds: completed_at - started_at, or now - started_at if live."""
+    if not state.started_at:
+        return None
+    end = state.completed_at or time.time()
+    return round(end - state.started_at, 2)
+
+
+def _stage_idx(state: ContinuumState) -> int:
+    """Index of the current agent within the 8-stage spine (-1 if none/unknown)."""
+    if state.current_agent is None:
+        return -1
+    return _STAGE_INDEX.get(state.current_agent.value, -1)
+
+
+def _run_summary(state: ContinuumState) -> Dict[str, Any]:
+    """Build a Work Queue row for a run (used by GET /runs)."""
+    return {
+        "run_id": state.run_id,
+        "request": (state.request or "")[:80],
+        "status": _classify(state),
+        "run_status": _classify(state),
+        "cost_usd": round(getattr(state, "cost_usd", 0.0), 4),
+        "duration_s": _duration_s(state),
+        "stage_idx": _stage_idx(state),
+        "stage_count": _STAGE_COUNT,
+        "started_at": state.started_at,
+        "completed_at": state.completed_at,
+        "current_agent": state.current_agent.value if state.current_agent else None,
+    }
+
+
+async def _mark_blocked(
+    state: ContinuumState, gate_name: str, error_message: str, run_id: str = ""
+) -> None:
+    """
+    Transition a run into the `blocked` state (M6): a gate stayed red past the
+    retry budget. Keeps human_approval_pending set so the existing resume path
+    and the new escalate-resolve endpoint can act on it.
+    """
+    state.run_status = "blocked"
+    state.human_approval_pending = True
+    state.approval_gate_name = gate_name
+    if run_id:
+        await event_bus.emit(run_id, {
+            "event_type": "run_blocked",
+            "agent": "developer",
+            "run_id": run_id,
+            "data": {"gate_name": gate_name, "error_message": (error_message or "")[:500]},
+        })
 
 
 # --------------------------------------------------------------------------- #
@@ -169,8 +268,12 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
         if gate is None or gate.status == "green":
             break
         if gate.retry_count >= _MAX_RETRIES:
-            state.human_approval_pending = True
-            state.approval_gate_name = "local_verify"
+            # M6: surface this as a first-class `blocked` run (distinct from the
+            # story/design/merge waiting_gate). _mark_blocked keeps the approval
+            # flag set so escalate-resolve / resume can re-drive the chain.
+            await _mark_blocked(
+                state, "local_verify", gate.error_message or "", run_id
+            )
             if run_id:
                 await event_bus.emit(run_id, {
                     "event_type": "human_gate_pending",
@@ -203,6 +306,9 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
         logger.warning("Memory agent failed (non-fatal): %s", mem_exc)
 
     state.completed_at = time.time()
+    # M6: only mark `done` if we didn't get parked in blocked/returned/failed.
+    if state.run_status not in _EXPLICIT_STATES:
+        state.run_status = "done"
 
     if run_id:
         await event_bus.emit(run_id, {
@@ -239,6 +345,7 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Pipeline failed for run %s", run_id)
             state.error_message = str(exc)
+            state.run_status = "failed"
             state.completed_at = time.time()
             await event_bus.emit(run_id, {
                 "event_type": "run_complete",
@@ -256,17 +363,7 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
 async def list_runs() -> List[Dict[str, Any]]:
     """Return all recorded runs, newest first."""
     runs = sorted(_RUNS.values(), key=lambda s: s.started_at or 0, reverse=True)
-    return [
-        {
-            "run_id": s.run_id,
-            "request": (s.request or "")[:80],
-            "status": _classify(s),
-            "started_at": s.started_at,
-            "completed_at": s.completed_at,
-            "current_agent": s.current_agent.value if s.current_agent else None,
-        }
-        for s in runs
-    ]
+    return [_run_summary(s) for s in runs]
 
 
 @app.get("/run/{run_id}")
@@ -408,123 +505,118 @@ async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
     return {"run_id": run_id, "approved": approved, "status": _classify(state)}
 
 
-@app.post("/run/{run_id}/resume")
-async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
+@app.post("/run/{run_id}/reject")
+async def reject_run(run_id: str, body: RejectRequest) -> Dict[str, Any]:
     """
-    Resume a run that is suspended at a human_gate interrupt().
+    Return a run to its author at a story/design review gate (M6).
 
-    This endpoint is called by an operator after reviewing the artifacts surfaced
-    by GET /run/{run_id}. Pass ?approved=true to unblock the gate and continue,
-    or ?approved=false to reject (leaves the run in 'escalated' state).
-
-    For M0/offline runs (no LangGraph checkpointer) the state is mutated
-    directly in-memory so that the response reflects the decision.
+    Records run_status="returned" + the reason, clears the relevant approval
+    flag, and emits `run_returned`. The run rests in `returned` for the operator
+    to inspect (the Returned panel) and resubmit — it is not auto-restarted, so
+    the status stays stable for the Work Queue.
     """
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
-    if not state.human_approval_pending:
-        raise HTTPException(status_code=409, detail="run is not waiting for human approval")
 
-    gate_name = state.approval_gate_name or ""
+    gate = body.gate or state.approval_gate_name or ""
+    if gate == "story_review":
+        state.story_approved = False
+    elif gate == "design_review":
+        state.design_approved = False
 
-    if not approved:
-        # Rejection — leave the run escalated; no further processing
-        logger.info("[RESUME] Run %s gate '%s' rejected by operator", run_id, gate_name)
-        return {"run_id": run_id, "status": "escalated", "state": _state_to_dict(state)}
-
-    # Approval — update the relevant flag and continue the pipeline
-    logger.info("[RESUME] Run %s gate '%s' approved by operator", run_id, gate_name)
-    if gate_name == "story_review":
-        state.story_approved = True
-    elif gate_name == "design_review":
-        state.design_approved = True
-    elif gate_name == "merge_review":
-        state.merge_approved = True
-    else:
-        # Gate-failure retry (e.g., local_verify escalated after 3 fails)
-        gate = _gate(state, gate_name)
-        if gate:
-            gate.retry_count = 0
-            gate.status = "pending"
-
+    state.run_status = "returned"
+    state.reject_reason = body.reason or None
     state.human_approval_pending = False
     state.approval_gate_name = None
 
-    # Re-run the remaining pipeline stages
-    try:
-        ctx = AgentContext.from_env()
+    await event_bus.emit(run_id, {
+        "event_type": "run_returned",
+        "agent": "",
+        "run_id": run_id,
+        "data": {"gate": gate, "reason": body.reason},
+    })
 
-        if gate_name == "story_review":
-            # Story approved — run the rest of the pipeline from Architect onwards
-            for role in ("architect", "planner"):
-                await run_agent(state, role, ctx)
+    return {"run_id": run_id, "status": _classify(state), "gate": gate, "reason": body.reason}
+
+
+@app.post("/run/{run_id}/escalate-resolve")
+async def escalate_resolve(run_id: str) -> Dict[str, Any]:
+    """
+    Send a `blocked` run back to implementation (M6).
+
+    Resets the blocking gate's retry budget, clears run_status back to
+    `running`, and re-drives the developer chain (developer → security → memory)
+    in the background — mirroring resume_run()'s local_verify branch.
+    """
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+
+    gate_name = state.approval_gate_name or "local_verify"
+    gate = _gate(state, gate_name)
+    if gate:
+        gate.retry_count = 0
+        gate.status = "pending"
+
+    state.run_status = "running"
+    state.human_approval_pending = False
+    state.approval_gate_name = None
+    state.completed_at = None
+
+    await event_bus.emit(run_id, {
+        "event_type": "human_gate_resolved",
+        "agent": "developer",
+        "run_id": run_id,
+        "data": {"gate_name": gate_name, "approved": True, "action": "escalate_resolve"},
+    })
+
+    async def _redrive() -> None:
+        try:
+            ctx = AgentContext.from_env()
+            ctx.run_id = run_id
             for _ in range(_MAX_RETRIES + 1):
                 await run_agent(state, "developer", ctx)
                 gv = _gate(state, "local_verify")
                 if gv is None or gv.status == "green":
                     break
                 if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "local_verify"
-                    break
+                    await _mark_blocked(state, "local_verify", gv.error_message or "", run_id)
+                    return
                 gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "merge_review"
-
-        elif gate_name == "design_review":
-            # Design approved — run Planner → Developer → Security
-            await run_agent(state, "planner", ctx)
-            for _ in range(_MAX_RETRIES + 1):
-                await run_agent(state, "developer", ctx)
-                gv = _gate(state, "local_verify")
-                if gv is None or gv.status == "green":
-                    break
-                if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "local_verify"
-                    break
-                gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "merge_review"
-
-        elif gate_name == "merge_review":
-            # Merge approved — finalise run
+            lv = _gate(state, "local_verify")
+            if lv is None or lv.status == "green":
+                await run_agent(state, "security", ctx)
+                try:
+                    await run_agent(state, "memory", ctx)
+                except Exception as mem_exc:  # noqa: BLE001
+                    logger.warning("Memory agent failed (non-fatal): %s", mem_exc)
+            state.completed_at = time.time()
+            if state.run_status not in _EXPLICIT_STATES:
+                state.run_status = "done"
+            await event_bus.emit(run_id, {
+                "event_type": "run_complete",
+                "agent": "",
+                "run_id": run_id,
+                "data": {"status": _classify(state)},
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("escalate-resolve re-drive failed for run %s", run_id)
+            state.error_message = str(exc)
+            state.run_status = "failed"
             state.completed_at = time.time()
 
-        else:
-            # Gate-failure retry — re-run developer
-            for _ in range(_MAX_RETRIES + 1):
-                await run_agent(state, "developer", ctx)
-                gv = _gate(state, gate_name)
-                if gv is None or gv.status == "green":
-                    break
-                if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = gate_name
-                    break
-                gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
+    asyncio.create_task(_redrive())
+    return {"run_id": run_id, "status": _classify(state)}
 
-        if not state.completed_at and not state.human_approval_pending:
-            state.completed_at = time.time()
 
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Resume pipeline failed for run %s", run_id)
-        state.error_message = str(exc)
-
-    return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}
+@app.get("/runs/{run_id}/evidence")
+async def get_evidence(run_id: str) -> Dict[str, Any]:
+    """Return the 6-layer Evidence Stack for a run (M6)."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return {"run_id": run_id, "evidence": build_evidence_stack(state)}
 
 
 @app.get("/health")

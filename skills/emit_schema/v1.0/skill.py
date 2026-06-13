@@ -82,7 +82,6 @@ def _build_schema(title: str, entities: List[str]) -> str:
 
     for i, entity in enumerate(entities[:5]):
         tbl = _table_name(entity)
-        col_name = entity.lower().replace(" ", "_")[:20]
 
         fk_clause = ""
         if i > 0 and "user" not in tbl:

@@ -162,7 +162,8 @@ async def main() -> int:
         stub_path.write_text("before: placeholder content\n", encoding="utf-8")
 
         from evolution.agent import _write_pending
-        import uuid, time
+        import uuid
+        import time
         safe_proposal = {
             "id": f"evo-test-{uuid.uuid4().hex[:6]}",
             "type": "prompt_edit",

@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from graph_db.driver import Neo4jDriver
 
 logger = logging.getLogger(__name__)
 

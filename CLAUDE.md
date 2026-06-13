@@ -14,10 +14,23 @@ python scripts/verify_agent_core.py   # must print 11/11
 python scripts/verify_m0_loop.py      # must print 3/3
 python scripts/verify_m3_learning.py  # must print 6/6
 python scripts/verify_m5_evolution.py # must print 6/6
+python scripts/verify_m6_workqueue.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
-These run the **offline / deterministic path** — no Azure credentials, no Neo4j, no Postgres required. Never break that path. Every new skill, agent, and Evolution proposal must have a fallback that works without any external service.
+These run the **offline / deterministic path** — no Azure credentials, no Neo4j, no Postgres required. Never break that path. Every new skill, agent, and Evolution proposal must have a fallback that works without any external service. The verifiers degrade gracefully on a thin environment: when `ruff`/`mypy`/`pytest` are absent, `gate_local_verify` falls back to `py_compile`.
+
+## Progress log discipline (follow this every session)
+
+`PROGRESS.md` is the running, dated record of the project. **Every commit that
+changes behaviour must add (or update) a `## YYYY-MM-DD — <title>` entry at the
+top of `PROGRESS.md`** in the same session, using the format documented at the
+top of that file (What / Files / Verification / Notes). Keep newest entries on
+top. The "Verification" block must list the exact checks you ran and their
+results — never claim a check passed without running it. When you add a new
+milestone verifier, also add it to the non-negotiable list above and add a
+`verify-mN` Makefile target, then keep `README.md` (badges, milestone timeline,
+verification matrix) in sync.
 
 ## Common Commands
 
@@ -27,6 +40,7 @@ make verify-offline   # 11/11 + 3/3
 make verify-m3        # 6/6 episodic memory
 make verify-m4        # CI gate (regression block)
 make verify-m5        # 6/6 Evolution Agent
+make verify-m6        # 6/6 Work Queue + Evidence Stack
 
 # Tests, lint, types
 pytest -q

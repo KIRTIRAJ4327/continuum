@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 # Maximum events stored per run (prevents unbounded memory growth).
 _MAX_LOG = 500
 
+# Event types are plain `event_type` strings on the emitted dict — there is no
+# enum. The full vocabulary (keep the UI's EVENT_STYLES map in sync):
+#   agent_start, agent_complete, gate_green, gate_red, gate_retry,
+#   human_gate_pending, human_gate_resolved, run_complete
+# M6 adds two run-lifecycle events:
+#   run_blocked  — a gate stayed red past max retries; data: {gate_name, error_message}
+#   run_returned — a human rejected a story/design gate; data: {gate, reason}
+
 
 class _EventBus:
     """Broadcast-style per-run event bus with full history replay."""
