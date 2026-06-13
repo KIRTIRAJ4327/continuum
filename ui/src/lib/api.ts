@@ -1,12 +1,18 @@
-import type { RunSummary, EvidenceLayer } from '../types';
+import type { RunSummary, EvidenceLayer, BusinessMapping } from '../types';
 
 const BASE = '';  // Vite proxy routes to http://localhost:8000
 
-export async function startRun(request: string): Promise<{ run_id: string }> {
+export async function startRun(
+  request: string,
+  businessMappings?: BusinessMapping[],
+): Promise<{ run_id: string }> {
   const res = await fetch(`${BASE}/run`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ request }),
+    body: JSON.stringify({
+      request,
+      ...(businessMappings?.length ? { business_mappings: businessMappings } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();

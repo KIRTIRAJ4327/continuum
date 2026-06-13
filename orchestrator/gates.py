@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -269,3 +269,72 @@ async def gate_contract_validate(contract_yaml: str) -> Tuple[bool, str]:
         return False, "'paths' must be a non-empty mapping"
 
     return True, f"contract OK: openapi={version}, paths={len(paths)}"
+
+
+# --------------------------------------------------------------------------- #
+# 4. scope_conformance — M7 Mapping Fidelity (D11 Scope-Guard)
+# --------------------------------------------------------------------------- #
+
+# Matches short ALL-CAPS codes (2-10 chars) used as string literals in mapping /
+# dict-key / assignment positions: "BR":  'ACC':  "CURR" =  "SV",
+_SCOPE_KEY_RE = re.compile(r"""["']([A-Z][A-Z0-9_]{1,9})["']\s*[=:,]""")
+
+
+def _check_scope(
+    business_mappings: List[Dict],
+    code: Dict[str, str],
+) -> Dict[str, Any]:
+    """Pure scanning logic — no network, no IO. Used by gate_scope_conformance."""
+    if not business_mappings:
+        return {
+            "supplied": [],
+            "found": [],
+            "extra_in_code": [],
+            "missing_in_code": [],
+            "exact_match": True,
+        }
+    supplied: set = {m["code"] for m in business_mappings if m.get("code")}
+    all_text = "\n".join((code or {}).values())
+    found_in_code: set = {m.group(1) for m in _SCOPE_KEY_RE.finditer(all_text)}
+    found = supplied & found_in_code
+    missing = supplied - found_in_code
+    extra = found_in_code - supplied
+    return {
+        "supplied": sorted(supplied),
+        "found": sorted(found),
+        "extra_in_code": sorted(extra),
+        "missing_in_code": sorted(missing),
+        "exact_match": len(missing) == 0 and len(extra) == 0,
+    }
+
+
+async def gate_scope_conformance(state: Any) -> Tuple[bool, str]:
+    """
+    M7: Scope-Guard gate. Checks that generated code uses *exactly* the supplied
+    business_mappings — all supplied codes must appear, and no unrecognised
+    mapping-like codes may be present.
+
+    Side-effect: sets state.mapping_fidelity with the full scan result so the
+    Evidence Stack (layer 4) and the MappingFidelity UI component can surface it.
+
+    Gate is always green when state.business_mappings is empty (nothing to enforce).
+    Never auto-retries on red — the run lands in `blocked` state (M6 Blocked panel).
+    """
+    mappings: List[Dict] = getattr(state, "business_mappings", []) or []
+    if not mappings:
+        return True, "no business_mappings supplied — scope guard skipped"
+
+    code: Dict[str, str] = getattr(state, "code", {}) or {}
+    result = _check_scope(mappings, code)
+    state.mapping_fidelity = result
+
+    if result["exact_match"]:
+        n = len(result["supplied"])
+        return True, f"scope ok: {n} mapping(s) confirmed in generated code"
+
+    parts: List[str] = []
+    if result["missing_in_code"]:
+        parts.append("missing: " + ", ".join(result["missing_in_code"]))
+    if result["extra_in_code"]:
+        parts.append("extra: " + ", ".join(result["extra_in_code"]))
+    return False, "scope mismatch — " + "; ".join(parts)

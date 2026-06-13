@@ -1,6 +1,6 @@
 # File: continuum/evals/evidence_stack.py
 """
-M6: Evidence Stack — a 6-layer, human-readable proof that a run is merge-ready.
+Evidence Stack — a 6-layer, human-readable proof that a run is merge-ready.
 
 `build_evidence_stack(state)` is a pure function of ContinuumState (no network,
 no credentials) so it is offline-safe per the evals/scorers/deterministic.py
@@ -9,7 +9,8 @@ convention. Each layer maps onto the *real* gates recorded on the state:
   1. Build / compile        — local_verify GateStatus (ruff + mypy portion)
   2. Regression suite       — local_verify GateStatus (pytest portion)
   3. Acceptance-criteria    — contract_validate GateStatus
-  4. Scope conformance      — M6 stub (pass); M7 wires this to mapping fidelity
+  4. Scope conformance      — M7: state.mapping_fidelity.exact_match
+                              (pass/skip when no business_mappings supplied)
   5. Lint + secret scan     — security_sast GateStatus
   6. Human review           — story/design/merge approval flags
 
@@ -52,6 +53,38 @@ def _gate_detail(gate: Optional[Any], ok_text: str) -> str:
         return ok_text
     msg = getattr(gate, "error_message", None)
     return (msg or "failed")[:300]
+
+
+def _scope_status(state: Any) -> str:
+    """Layer-4 status driven by M7 state.mapping_fidelity."""
+    bm = getattr(state, "business_mappings", []) or []
+    if not bm:
+        return "pass"  # nothing to enforce
+    mf = getattr(state, "mapping_fidelity", None)
+    if mf is None:
+        return "pending"
+    return "pass" if mf.get("exact_match") else "fail"
+
+
+def _scope_detail(state: Any) -> str:
+    """Layer-4 detail string driven by M7 state.mapping_fidelity."""
+    bm = getattr(state, "business_mappings", []) or []
+    if not bm:
+        return "no business_mappings supplied (scope guard skipped)"
+    mf = getattr(state, "mapping_fidelity", None)
+    if mf is None:
+        return "scope guard not yet run"
+    if mf.get("exact_match"):
+        n = len(mf.get("found", []))
+        return f"{n} mapping(s) confirmed in generated code"
+    parts: List[str] = []
+    missing = mf.get("missing_in_code", [])
+    extra = mf.get("extra_in_code", [])
+    if missing:
+        parts.append("missing: " + ", ".join(missing))
+    if extra:
+        parts.append("extra: " + ", ".join(extra))
+    return "; ".join(parts) if parts else "scope mismatch"
 
 
 def build_evidence_stack(state: Any) -> List[Dict[str, str]]:
@@ -101,9 +134,9 @@ def build_evidence_stack(state: Any) -> List[Dict[str, str]]:
         },
         {
             "layer": "Scope conformance",
-            "sublabel": "mapping fidelity (D11) — wired in M7",
-            "status": "pass",
-            "detail": "stub: no business mappings enforced yet (M6)",
+            "sublabel": "mapping fidelity (D11 Scope-Guard)",
+            "status": _scope_status(state),
+            "detail": _scope_detail(state),
         },
         {
             "layer": "Lint + secret scan",

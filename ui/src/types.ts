@@ -28,6 +28,20 @@ export type RunStatus =
   | 'done'
   | 'failed';
 
+// ─── M7: business mapping (code + label pair) ────────────────────────────────
+export interface BusinessMapping {
+  code: string;
+  label: string;
+}
+
+export interface MappingFidelity {
+  supplied: string[];
+  found: string[];
+  extra_in_code: string[];
+  missing_in_code: string[];
+  exact_match: boolean;
+}
+
 export interface RunSummary {
   run_id: string;
   request: string;
@@ -42,6 +56,9 @@ export interface RunSummary {
   started_at: number | null;
   completed_at: number | null;
   current_agent: string | null;
+  // M7 scope-guard
+  business_mappings?: BusinessMapping[];
+  mapping_fidelity?: MappingFidelity | null;
 }
 
 // ─── M6: one row of the 6-layer Evidence Stack ───────────────────────────────

@@ -8,6 +8,7 @@ import { ArtifactViewer } from './components/ArtifactViewer';
 import { Blocked } from './components/Blocked';
 import { Returned } from './components/Returned';
 import { EvidenceStack } from './components/EvidenceStack';
+import { MappingFidelity } from './components/MappingFidelity';
 import { RunMetrics } from './components/RunMetrics';
 import { useSSE } from './hooks/useSSE';
 import { listRuns } from './lib/api';
@@ -235,6 +236,10 @@ export default function App() {
                     {rightTab === 'evidence' && (
                       <div className="p-3 space-y-4">
                         <RunMetrics run={activeRun} events={events} />
+                        <MappingFidelity
+                          businessMappings={activeRun?.business_mappings}
+                          fidelity={activeRun?.mapping_fidelity}
+                        />
                         <EvidenceStack runId={activeRunId} />
                         {!isDone && (
                           <p className="text-[10px] text-slate-600 text-center">

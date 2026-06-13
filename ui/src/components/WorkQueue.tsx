@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { RunSummary, RunStatus } from '../types';
+import type { RunSummary, RunStatus, BusinessMapping } from '../types';
 import { startRun } from '../lib/api';
 
 interface Props {
@@ -93,6 +93,14 @@ function RunRow({
 export function WorkQueue({ runs, activeRunId, onSelect, onRunStarted }: Props) {
   const [input, setInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showMappings, setShowMappings] = useState(false);
+  const [mappings, setMappings] = useState<BusinessMapping[]>([]);
+
+  function updateMapping(i: number, field: keyof BusinessMapping, value: string) {
+    const next = [...mappings];
+    next[i] = { ...next[i], [field]: value };
+    setMappings(next);
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -100,8 +108,11 @@ export function WorkQueue({ runs, activeRunId, onSelect, onRunStarted }: Props) 
     if (!req) return;
     setSubmitting(true);
     try {
-      const { run_id } = await startRun(req);
+      const validMappings = mappings.filter((m) => m.code.trim());
+      const { run_id } = await startRun(req, validMappings.length ? validMappings : undefined);
       setInput('');
+      setMappings([]);
+      setShowMappings(false);
       onRunStarted(run_id);
     } catch (err) {
       console.error('Failed to start run', err);
@@ -144,6 +155,55 @@ export function WorkQueue({ runs, activeRunId, onSelect, onRunStarted }: Props) 
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSubmit(e);
           }}
         />
+        {/* Business-mappings (M7 D11 Scope-Guard) */}
+        <button
+          type="button"
+          onClick={() => setShowMappings(!showMappings)}
+          className="mt-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+        >
+          {showMappings ? '▲ Hide mappings' : '▼ Business mappings (optional)'}
+        </button>
+        {showMappings && (
+          <div className="mt-1 space-y-1">
+            {mappings.map((m, i) => (
+              <div key={i} className="flex gap-1">
+                <input
+                  className="w-16 bg-[#1e2535] border border-[#2a3349] rounded px-2 py-1 text-xs
+                             text-slate-200 placeholder-slate-600 uppercase focus:outline-none
+                             focus:border-sky-500"
+                  placeholder="Code"
+                  value={m.code}
+                  onChange={(e) => updateMapping(i, 'code', e.target.value.toUpperCase())}
+                />
+                <input
+                  className="flex-1 bg-[#1e2535] border border-[#2a3349] rounded px-2 py-1 text-xs
+                             text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500"
+                  placeholder="Label"
+                  value={m.label}
+                  onChange={(e) => updateMapping(i, 'label', e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setMappings(mappings.filter((_, j) => j !== i))}
+                  className="text-xs text-slate-600 hover:text-rose-400 px-1 transition-colors"
+                >
+                  ✗
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => setMappings([...mappings, { code: '', label: '' }])}
+              className="text-[10px] text-slate-500 hover:text-sky-400 transition-colors"
+            >
+              + Add mapping
+            </button>
+            <p className="text-[10px] text-slate-600 leading-tight">
+              D11 shield — generated code must use exactly these codes.
+            </p>
+          </div>
+        )}
+
         <button
           type="submit"
           disabled={submitting || !input.trim()}
