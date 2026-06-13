@@ -1,6 +1,6 @@
 """Tests for the orchestrator."""
 import pytest
-from orchestrator.state import ContinuumState, AgentRole
+from orchestrator.state import ContinuumState
 
 @pytest.mark.asyncio
 async def test_orchestrator_routes_to_bsa():

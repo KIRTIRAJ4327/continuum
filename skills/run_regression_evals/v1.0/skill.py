@@ -22,7 +22,6 @@ async def run_regression_evals(
     Returns:
         {improved: bool, delta_pp: float, safe: bool, baseline: dict, current: dict}
     """
-    import asyncio
     from evolution import evaluator
 
     proposal: Dict[str, Any] = {}

@@ -6,7 +6,6 @@ Offline path: Derives the contract from the story title and spec entities.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re

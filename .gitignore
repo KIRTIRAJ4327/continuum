@@ -31,3 +31,7 @@ htmlcov/
 node_modules/
 ui/dist/
 ui/Tempnpm-cache/
+
+# Transient verifier / eval artifacts (baseline.json is the tracked snapshot)
+evals/results/ci_*.json
+evolution/proposals/**/evo-test-*.json

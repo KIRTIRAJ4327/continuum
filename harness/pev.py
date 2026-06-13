@@ -12,7 +12,7 @@ The PEV loop turns model intentions into bounded, observable, revisable state tr
 - VERIFY: Deterministic sensors (lint, type, test, SAST) validate the transition
 """
 
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Tuple
 import time
 
 class PEVContract:

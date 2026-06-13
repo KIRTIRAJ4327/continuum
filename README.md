@@ -31,7 +31,8 @@
 [![Learning Tests](https://img.shields.io/badge/Learning_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![CI Gate](https://img.shields.io/badge/CI_Gate-PASS-22C55E?style=flat-square&logo=github-actions&logoColor=white)]()
 [![Evolution Tests](https://img.shields.io/badge/Evolution_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M5_Complete-7C3AED?style=flat-square)]()
+[![Work Queue Tests](https://img.shields.io/badge/WorkQueue_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M6_Complete-7C3AED?style=flat-square)]()
 
 </div>
 
@@ -308,6 +309,43 @@ Change is live. Governed. Auditable. Reversible.
 
 ---
 
+## 🗂️ Work Queue & Evidence Stack (M6)
+
+The UI becomes a **multi-run triage console**, and every run carries a cost +
+lead-time and a 6-layer proof of merge-readiness.
+
+```
+run_status lifecycle:  running → waiting_gate → blocked / returned → done / failed
+                                       │             │
+                          local_verify red ×3    human returns a
+                          → BLOCKED (escalate)   story/design gate
+                                                 → RETURNED (with reason)
+
+Evidence Stack (independent ground truth, per run):
+  1. Build / compile        ← local_verify (ruff + mypy + py_compile)
+  2. Regression suite       ← local_verify (pytest)
+  3. Acceptance-criteria    ← contract_validate
+  4. Scope conformance      ← stub today; wired to mapping fidelity in M7
+  5. Lint + secret scan     ← security_sast
+  6. Human review           ← story / design / merge approvals
+```
+
+- **Work Queue** (`ui/src/components/WorkQueue.tsx`) — "Waiting on you" vs "All
+  runs", each row a status badge + cost + lead-time.
+- **Spine** (`Spine.tsx`) — per-run vertical stage tracker; the AgentGraph stays
+  as a secondary engineer view.
+- **Blocked / Returned** panels — failing-gate sensor output with a
+  "Send back to Implementation" action, or the rejection reason.
+- **Evidence Stack + Run Metrics** — First-pass · Lead time · Model cost.
+- **Cost accounting** — `state.cost_usd` accrues per agent (fixed estimate
+  offline, token-priced when a live model is used); always populated.
+
+New API: `POST /run/{id}/reject` · `POST /run/{id}/escalate-resolve` ·
+`GET /runs/{id}/evidence`. New events: `run_blocked` · `run_returned`.
+Proven offline in `scripts/verify_m6_workqueue.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -327,7 +365,10 @@ M4 ──── pass^k runner · 20 golden cases · CI regression gate
   │     PR #7  ✅  60/30/10 scorer mix · block-on-2pp regression
   │
 M5 ──── Evolution Agent · bounded dynamic decomposition
-        PR #8  ✅  observe→propose→human-promote · 6/6 PASS
+  │     PR #8  ✅  observe→propose→human-promote · 6/6 PASS
+  │
+M6 ──── Work Queue UI · 6-layer Evidence Stack · run metrics
+        ✅  run_status lifecycle · cost + lead-time · blocked/returned · 6/6 PASS
 ```
 
 ---
@@ -402,6 +443,7 @@ make verify-offline   # agent core + loop termination
 make verify-m3        # learning lift (run N+1 > run N)
 make verify-m4        # eval CI gate (regression blocking)
 make verify-m5        # evolution agent (governed harness mutation)
+make verify-m6        # work queue + evidence stack + run metrics
 ```
 
 | Script | Checks | Result |
@@ -411,8 +453,9 @@ make verify-m5        # evolution agent (governed harness mutation)
 | `scripts/verify_m3_learning.py` | episode write · retrieval · score=1.0 | 6/6 ✅ |
 | `evals/ci_gate.py` | stable vs baseline · regression detection | PASS ✅ |
 | `scripts/verify_m5_evolution.py` | observe · diagnose · propose · eval · promote | 6/6 ✅ |
+| `scripts/verify_m6_workqueue.py` | cost accrual · run_status · reject · blocked · evidence | 6/6 ✅ |
 
-> All 5 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
+> All 6 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
 
 ---
 
@@ -454,6 +497,7 @@ continuum/
 │   ├── golden/            #   20 feature requests + structural labels
 │   ├── scorers/           #   deterministic (60%) · judge (30%) · human (10%)
 │   ├── pass_k_runner.py   #   k-trial reliability measurement
+│   ├── evidence_stack.py  #   M6: 6-layer merge-readiness proof (pure/offline)
 │   └── ci_gate.py         #   baseline-compare → exit 1 on regression
 ├── evolution/             # Evolution Agent (governed harness mutation)
 │   ├── agent.py           #   observe → diagnose → propose
@@ -461,8 +505,10 @@ continuum/
 │   └── promoter.py        #   human_promote() — the ONLY apply path
 ├── integrations/          # Azure DevOps MCP · web research
 ├── ui/                    # React 18 + React Flow + Tailwind + Vite
-│   └── src/components/    #   AgentGraph · ActivityStream · GateInbox · ArtifactViewer
+│   └── src/components/    #   WorkQueue · Spine · AgentGraph · ActivityStream
+│                          #   GateInbox · ArtifactViewer · EvidenceStack · RunMetrics
 ├── api/                   # FastAPI: /run · /events (SSE) · /artifacts · /resume
+│                          #   M6: /reject · /escalate-resolve · /runs/{id}/evidence
 ├── scripts/               # Verification scripts for each milestone
 ├── docker-compose.yml     # Neo4j 5.15 + Postgres 15
 └── Makefile               # make run · make services · make verify-* · make evo-*
@@ -497,6 +543,7 @@ make verify-offline   # 11/11 + 3/3 agent + loop tests
 make verify-m3        # 6/6 learning lift demo
 make verify-m4        # eval CI gate
 make verify-m5        # 6/6 evolution agent demo
+make verify-m6        # 6/6 work queue + evidence stack demo
 make eval-baseline    # run full eval suite, write baseline
 make eval-ci          # fast CI check (5 cases)
 make eval-report      # full pass^k report (20 cases, k=5)

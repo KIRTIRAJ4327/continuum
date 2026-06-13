@@ -14,7 +14,7 @@ async def propose_patch(
 
     Returns a proposal dict that can be passed to evolution/evaluator.py.
     """
-    from evolution.agent import EvolutionAgent, _PROPOSAL_TEMPLATES
+    from evolution.agent import EvolutionAgent
 
     agent = EvolutionAgent()
 
