@@ -1,14 +1,16 @@
-"""FastAPI backend for Continuum — M2 edition.
+"""FastAPI backend for Continuum — M6 edition.
 
-New in M2:
-  • POST /run        — starts pipeline in background; returns run_id immediately
-  • GET  /events/{run_id} — SSE stream of agent events (text/event-stream)
-  • GET  /artifacts/{run_id}/{agent} — agent artifact (story/contract/code/…)
-  • GET  /runs       — recent runs list with status
+New in M6:
+  • run_status field (running/waiting_gate/blocked/returned/done/failed)
+  • cost_usd accumulated per agent run
+  • POST /run/{id}/reject          — human rejects at a gate → run_returned
+  • POST /run/{id}/escalate-resolve — unblock after retry exhaustion
+  • GET  /runs/{id}/evidence        — 6-layer evidence stack
+  • GET  /runs extended with run_status, cost_usd, duration_s, stage_idx
 
-The M0 offline / verify path is preserved:
-  • _execute_pipeline(state) is still an awaitable called by verify_m0_loop.py.
-  • 11/11 and 3/3 still pass with no external dependencies.
+M0-M5 offline / verify path is preserved:
+  • _execute_pipeline(state) is still a plain awaitable (no run_id required).
+  • 11/11 + 3/3 + 6/6 (M3/M5) still pass with no external dependencies.
 """
 from __future__ import annotations
 
@@ -31,18 +33,11 @@ from orchestrator.state import AgentRole, ContinuumState
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Continuum", version="0.2.0")
+app = FastAPI(title="Continuum", version="0.6.0")
 
 
 @app.on_event("startup")
 async def validate_env() -> None:
-    """
-    Warn about missing optional env vars at startup.
-
-    The server ALWAYS starts — even without any credentials — because the
-    offline/stub path handles all cases.  This validator only logs warnings so
-    operators know which integrations are in stub mode.
-    """
     try:
         from config import warn_missing_optional, AZURE_AI_LIVE, AZURE_ADO_LIVE  # type: ignore
         missing = warn_missing_optional()
@@ -63,7 +58,6 @@ async def validate_env() -> None:
         logger.debug("[startup] config module not available — skipping env validation")
 
 
-# Allow the Vite dev server (port 5173) to call the API during development.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,14 +69,30 @@ app.add_middleware(
 _RUNS: Dict[str, ContinuumState] = {}
 _MAX_RETRIES = 3
 
+# Canonical stage order for stage_idx computation.
+_STAGE_ORDER = [
+    "bsa", "architect", "planner",
+    "database", "backend", "frontend",
+    "security", "memory",
+]
+
 
 # --------------------------------------------------------------------------- #
 # Request / response models
 # --------------------------------------------------------------------------- #
 class FeatureRequest(BaseModel):
     request: str
+    business_mappings: List[Dict[str, Any]] = []  # M7: optional mapping table
 
 
+class RejectRequest(BaseModel):
+    gate: str   # "story_review" | "design_review" | "local_verify" | …
+    reason: str
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
 def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
     """Serialise state for JSON responses."""
     return {
@@ -114,6 +124,10 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "episodes_written": len(state.episodes_written or []),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
+        # M6 fields
+        "run_status": state.run_status,
+        "cost_usd": round(state.cost_usd, 4),
+        "reject_reason": state.reject_reason,
     }
 
 
@@ -122,13 +136,24 @@ def _gate(state: ContinuumState, name: str) -> Optional[Any]:
 
 
 def _classify(state: ContinuumState) -> str:
-    if state.human_approval_pending:
-        return "awaiting_approval"
-    if state.error_message:
-        return "failed"
-    if state.completed_at:
-        return "complete"
-    return "running"
+    """Return the run status string (M6: uses run_status field)."""
+    return state.run_status
+
+
+def _duration_s(state: ContinuumState) -> Optional[float]:
+    if state.started_at is None:
+        return None
+    end = state.completed_at or time.time()
+    return round(end - state.started_at, 1)
+
+
+def _stage_idx(state: ContinuumState) -> int:
+    if state.current_agent is None:
+        return -1
+    try:
+        return _STAGE_ORDER.index(state.current_agent.value)
+    except ValueError:
+        return -1
 
 
 # --------------------------------------------------------------------------- #
@@ -139,15 +164,15 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     Walk the pipeline applying retry/escalate rules.
 
     run_id (optional): when set, events are emitted to event_bus so the SSE
-    stream and React UI receive live updates.  When absent (offline tests) the
+    stream and React UI receive live updates. When absent (offline tests) the
     function runs silently with no external side-effects.
     """
+    state.run_status = "running"
     ctx = AgentContext.from_env()
-    ctx.run_id = run_id  # wire the run_id so run_agent() can emit events
+    ctx.run_id = run_id
 
     async def _run(role: str) -> None:
         await run_agent(state, role, ctx)
-        # Emit human-gate-pending if the run paused for approval
         if run_id and state.human_approval_pending:
             await event_bus.emit(run_id, {
                 "event_type": "human_gate_pending",
@@ -156,11 +181,12 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
                 "data": {"gate_name": state.approval_gate_name},
             })
 
-    # 1. BSA → Architect → Planner (no retry gates on this stretch in M0)
+    # 1. BSA → Architect → Planner
     for role in ("bsa", "architect", "planner"):
         await _run(role)
         if state.human_approval_pending:
-            return  # pause here; resume() will restart us
+            state.run_status = "waiting_gate"
+            return  # pause; resume() will restart from the right stage
 
     # 2. Developer with local_verify retry loop
     for attempt in range(_MAX_RETRIES + 1):
@@ -169,14 +195,18 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
         if gate is None or gate.status == "green":
             break
         if gate.retry_count >= _MAX_RETRIES:
+            state.run_status = "blocked"
             state.human_approval_pending = True
             state.approval_gate_name = "local_verify"
             if run_id:
                 await event_bus.emit(run_id, {
-                    "event_type": "human_gate_pending",
+                    "event_type": "run_blocked",
                     "agent": "developer",
                     "run_id": run_id,
-                    "data": {"gate_name": "local_verify", "reason": "max_retries_exceeded"},
+                    "data": {
+                        "gate_name": "local_verify",
+                        "error_message": (gate.error_message or "")[:500],
+                    },
                 })
             logger.error("local_verify failed after %d retries — escalating", _MAX_RETRIES)
             return
@@ -195,14 +225,14 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     if lv is None or lv.status == "green":
         await _run("security")
 
-    # 4. M3: Memory agent — write episode regardless of gate outcomes so future
-    #    runs can learn from both successes and failures.
+    # 4. M3: Memory agent (non-fatal)
     try:
         await _run("memory")
     except Exception as mem_exc:  # noqa: BLE001
         logger.warning("Memory agent failed (non-fatal): %s", mem_exc)
 
     state.completed_at = time.time()
+    state.run_status = "done"
 
     if run_id:
         await event_bus.emit(run_id, {
@@ -210,10 +240,101 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             "agent": "",
             "run_id": run_id,
             "data": {
-                "status": _classify(state),
+                "status": "done",
                 "episodes_written": len(state.episodes_written or []),
+                "cost_usd": state.cost_usd,
             },
         })
+
+
+# --------------------------------------------------------------------------- #
+# Resume helper — runs remaining stages after a gate approval
+# --------------------------------------------------------------------------- #
+async def _resume_pipeline(state: ContinuumState, run_id: str, gate_name: str) -> None:
+    """Continue the pipeline from where it was paused, after a gate approval."""
+    ctx = AgentContext.from_env()
+    ctx.run_id = run_id
+    state.run_status = "running"
+
+    async def _run(role: str) -> None:
+        await run_agent(state, role, ctx)
+
+    async def _developer_loop(resume_gate: str) -> None:
+        """Run developer with retry, then security + memory on success."""
+        for _ in range(_MAX_RETRIES + 1):
+            await _run("developer")
+            gv = _gate(state, resume_gate)
+            if gv is None or gv.status == "green":
+                break
+            if gv.retry_count >= _MAX_RETRIES:
+                state.run_status = "blocked"
+                state.human_approval_pending = True
+                state.approval_gate_name = resume_gate
+                if run_id:
+                    await event_bus.emit(run_id, {
+                        "event_type": "run_blocked",
+                        "agent": "developer",
+                        "run_id": run_id,
+                        "data": {
+                            "gate_name": resume_gate,
+                            "error_message": (gv.error_message or "")[:500],
+                        },
+                    })
+                return
+            gv.retry_count += 1
+            if run_id:
+                await event_bus.emit(run_id, {
+                    "event_type": "gate_retry",
+                    "agent": "developer",
+                    "run_id": run_id,
+                    "data": {"gate_name": resume_gate, "attempt": gv.retry_count},
+                })
+
+        if state.human_approval_pending:
+            return
+
+        lv = _gate(state, "local_verify")
+        if lv is None or lv.status == "green":
+            await _run("security")
+
+        try:
+            await _run("memory")
+        except Exception as mem_exc:  # noqa: BLE001
+            logger.warning("Memory agent failed (non-fatal): %s", mem_exc)
+
+        state.completed_at = time.time()
+        state.run_status = "done"
+        if run_id:
+            await event_bus.emit(run_id, {
+                "event_type": "run_complete",
+                "agent": "",
+                "run_id": run_id,
+                "data": {"status": "done", "cost_usd": state.cost_usd},
+            })
+
+    if gate_name == "story_review":
+        await _run("architect")
+        await _run("planner")
+        await _developer_loop("local_verify")
+
+    elif gate_name == "design_review":
+        await _run("planner")
+        await _developer_loop("local_verify")
+
+    elif gate_name == "merge_review":
+        state.completed_at = time.time()
+        state.run_status = "done"
+        if run_id:
+            await event_bus.emit(run_id, {
+                "event_type": "run_complete",
+                "agent": "",
+                "run_id": run_id,
+                "data": {"status": "done", "cost_usd": state.cost_usd},
+            })
+
+    else:
+        # local_verify failure retry — resume developer chain
+        await _developer_loop(gate_name)
 
 
 # --------------------------------------------------------------------------- #
@@ -221,24 +342,26 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
 # --------------------------------------------------------------------------- #
 @app.post("/run")
 async def start_run(req: FeatureRequest) -> Dict[str, Any]:
-    """
-    Submit a feature request.  Returns run_id immediately; pipeline runs in
-    background.  Connect to GET /events/{run_id} for live progress.
-    """
+    """Submit a feature request. Returns run_id immediately; pipeline runs in background."""
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="request is empty")
 
     run_id = uuid.uuid4().hex[:12]
-    state = ContinuumState(request=req.request, run_id=run_id, started_at=time.time())
+    state = ContinuumState(
+        request=req.request,
+        run_id=run_id,
+        started_at=time.time(),
+        business_mappings=req.business_mappings,
+    )
     _RUNS[run_id] = state
 
-    # Background task — emits events as each agent completes.
     async def _bg() -> None:
         try:
             await _execute_pipeline(state, run_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Pipeline failed for run %s", run_id)
             state.error_message = str(exc)
+            state.run_status = "failed"
             state.completed_at = time.time()
             await event_bus.emit(run_id, {
                 "event_type": "run_complete",
@@ -248,7 +371,6 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
             })
 
     asyncio.create_task(_bg())
-
     return {"run_id": run_id, "status": "running"}
 
 
@@ -261,9 +383,15 @@ async def list_runs() -> List[Dict[str, Any]]:
             "run_id": s.run_id,
             "request": (s.request or "")[:80],
             "status": _classify(s),
+            "run_status": s.run_status,
             "started_at": s.started_at,
             "completed_at": s.completed_at,
             "current_agent": s.current_agent.value if s.current_agent else None,
+            # M6 additions
+            "cost_usd": round(s.cost_usd, 4),
+            "duration_s": _duration_s(s),
+            "stage_idx": _stage_idx(s),
+            "reject_reason": s.reject_reason,
         }
         for s in runs
     ]
@@ -279,22 +407,15 @@ async def get_run(run_id: str) -> Dict[str, Any]:
 
 @app.get("/events/{run_id}")
 async def stream_events(run_id: str) -> StreamingResponse:
-    """
-    Server-Sent Events stream for a run.  Replays historical events first
-    (so a late-joining client does not miss agent_start / agent_complete
-    events that already fired), then streams live events until run_complete.
-    """
+    """SSE stream for a run. Replays history on connect then streams live events."""
     if run_id not in _RUNS:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
 
     async def _generator():
         q, history = event_bus.subscribe(run_id)
         try:
-            # Replay history so the UI catches up immediately on first connect.
             for ev in history:
                 yield f"data: {json.dumps(ev, default=str)}\n\n"
-
-            # Stream live events.
             while True:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=25.0)
@@ -302,7 +423,7 @@ async def stream_events(run_id: str) -> StreamingResponse:
                     if ev.get("event_type") == "run_complete":
                         break
                 except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"  # SSE comment keeps the connection alive
+                    yield ": keepalive\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -311,10 +432,7 @@ async def stream_events(run_id: str) -> StreamingResponse:
     return StreamingResponse(
         _generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable Nginx buffering for SSE
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -330,11 +448,7 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
     if role == AgentRole.BSA.value:
         artifacts = {"story": state.story}
     elif role == AgentRole.ARCHITECT.value:
-        artifacts = {
-            "contract": state.contract,
-            "schema": state.schema,
-            "dag": state.dag,
-        }
+        artifacts = {"contract": state.contract, "schema": state.schema, "dag": state.dag}
     elif role == AgentRole.PLANNER.value:
         artifacts = {"plan": (state.dag or {}).get("plan")}
     elif role in (AgentRole.DEVELOPER.value, "database", "backend", "frontend"):
@@ -358,68 +472,7 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
 
 @app.post("/run/{run_id}/resume")
 async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
-    """Resume a run that is paused at a human approval gate."""
-    state = _RUNS.get(run_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
-    if not state.human_approval_pending:
-        raise HTTPException(status_code=400, detail="run is not awaiting human approval")
-
-    gate_name = state.approval_gate_name or ""
-
-    if approved:
-        # Set the appropriate approval flag.
-        if gate_name == "story_review":
-            state.story_approved = True
-        elif gate_name == "design_review":
-            state.design_approved = True
-        elif gate_name == "merge_review":
-            state.merge_approved = True
-        else:
-            # Local verify / other gate failure — clear retry count so it re-runs
-            g = _gate(state, gate_name)
-            if g:
-                g.retry_count = 0
-                g.status = "pending"
-    # else: rejected — pipeline stays paused with human_approval_pending=True
-
-    state.human_approval_pending = False
-    state.approval_gate_name = None
-
-    await event_bus.emit(run_id, {
-        "event_type": "human_gate_resolved",
-        "agent": "",
-        "run_id": run_id,
-        "data": {"gate_name": gate_name, "approved": approved},
-    })
-
-    if approved:
-        # Resume the pipeline in a background task from where it left off.
-        async def _resume_bg() -> None:
-            try:
-                await _execute_pipeline(state, run_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Resumed pipeline failed for run %s", run_id)
-                state.error_message = str(exc)
-                state.completed_at = time.time()
-
-        asyncio.create_task(_resume_bg())
-
-    return {"run_id": run_id, "approved": approved, "status": _classify(state)}
-
-
-@app.post("/run/{run_id}/resume")
-async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
-    """
-    Resume a run that is suspended at a human_gate interrupt().
-
-    This endpoint is called by an operator after reviewing the artifacts surfaced
-    by GET /run/{run_id}. Pass ?approved=true to unblock the gate and continue,
-    or ?approved=false to reject (leaves the run in 'escalated' state).
-
-    For M0/offline runs (no LangGraph checkpointer) the state is mutated
-    directly in-memory so that the response reflects the decision.
-    """
+    """Resume a run paused at a human approval gate."""
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
@@ -429,11 +482,9 @@ async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
     gate_name = state.approval_gate_name or ""
 
     if not approved:
-        # Rejection — leave the run escalated; no further processing
         logger.info("[RESUME] Run %s gate '%s' rejected by operator", run_id, gate_name)
         return {"run_id": run_id, "status": "escalated", "state": _state_to_dict(state)}
 
-    # Approval — update the relevant flag and continue the pipeline
     logger.info("[RESUME] Run %s gate '%s' approved by operator", run_id, gate_name)
     if gate_name == "story_review":
         state.story_approved = True
@@ -442,89 +493,95 @@ async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
     elif gate_name == "merge_review":
         state.merge_approved = True
     else:
-        # Gate-failure retry (e.g., local_verify escalated after 3 fails)
-        gate = _gate(state, gate_name)
-        if gate:
-            gate.retry_count = 0
-            gate.status = "pending"
+        g = _gate(state, gate_name)
+        if g:
+            g.retry_count = 0
+            g.status = "pending"
 
     state.human_approval_pending = False
     state.approval_gate_name = None
 
-    # Re-run the remaining pipeline stages
+    await event_bus.emit(run_id, {
+        "event_type": "human_gate_resolved",
+        "agent": "",
+        "run_id": run_id,
+        "data": {"gate_name": gate_name, "approved": True},
+    })
+
+    async def _resume_bg() -> None:
+        try:
+            await _resume_pipeline(state, run_id, gate_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Resumed pipeline failed for run %s", run_id)
+            state.error_message = str(exc)
+            state.run_status = "failed"
+
+    asyncio.create_task(_resume_bg())
+    return {"run_id": run_id, "approved": True, "status": _classify(state)}
+
+
+@app.post("/run/{run_id}/reject")
+async def reject_run(run_id: str, req: RejectRequest) -> Dict[str, Any]:
+    """Reject at a gate — sets run_status='returned', emits run_returned."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+
+    state.run_status = "returned"
+    state.reject_reason = req.reason
+    state.human_approval_pending = False
+    state.approval_gate_name = None
+
+    await event_bus.emit(run_id, {
+        "event_type": "run_returned",
+        "agent": "",
+        "run_id": run_id,
+        "data": {"gate": req.gate, "reason": req.reason},
+    })
+
+    logger.info("[REJECT] Run %s gate '%s' returned: %s", run_id, req.gate, req.reason)
+    return {"run_id": run_id, "status": "returned"}
+
+
+@app.post("/run/{run_id}/escalate-resolve")
+async def escalate_resolve(run_id: str) -> Dict[str, Any]:
+    """Reset a blocked run and re-drive the developer chain."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+
+    gate_name = state.approval_gate_name or "local_verify"
+    g = _gate(state, gate_name)
+    if g:
+        g.retry_count = 0
+        g.status = "pending"
+
+    state.human_approval_pending = False
+    state.approval_gate_name = None
+
+    async def _esc_bg() -> None:
+        try:
+            await _resume_pipeline(state, run_id, gate_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Escalate-resolve failed for run %s", run_id)
+            state.error_message = str(exc)
+            state.run_status = "failed"
+
+    asyncio.create_task(_esc_bg())
+    return {"run_id": run_id, "status": "running"}
+
+
+@app.get("/runs/{run_id}/evidence")
+async def get_evidence(run_id: str) -> List[Dict[str, Any]]:
+    """Return the 6-layer evidence stack for a run."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     try:
-        ctx = AgentContext.from_env()
-
-        if gate_name == "story_review":
-            # Story approved — run the rest of the pipeline from Architect onwards
-            for role in ("architect", "planner"):
-                await run_agent(state, role, ctx)
-            for _ in range(_MAX_RETRIES + 1):
-                await run_agent(state, "developer", ctx)
-                gv = _gate(state, "local_verify")
-                if gv is None or gv.status == "green":
-                    break
-                if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "local_verify"
-                    break
-                gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "merge_review"
-
-        elif gate_name == "design_review":
-            # Design approved — run Planner → Developer → Security
-            await run_agent(state, "planner", ctx)
-            for _ in range(_MAX_RETRIES + 1):
-                await run_agent(state, "developer", ctx)
-                gv = _gate(state, "local_verify")
-                if gv is None or gv.status == "green":
-                    break
-                if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "local_verify"
-                    break
-                gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
-                    state.human_approval_pending = True
-                    state.approval_gate_name = "merge_review"
-
-        elif gate_name == "merge_review":
-            # Merge approved — finalise run
-            state.completed_at = time.time()
-
-        else:
-            # Gate-failure retry — re-run developer
-            for _ in range(_MAX_RETRIES + 1):
-                await run_agent(state, "developer", ctx)
-                gv = _gate(state, gate_name)
-                if gv is None or gv.status == "green":
-                    break
-                if gv.retry_count >= _MAX_RETRIES:
-                    state.human_approval_pending = True
-                    state.approval_gate_name = gate_name
-                    break
-                gv.retry_count += 1
-            if not state.human_approval_pending:
-                lv = _gate(state, "local_verify")
-                if lv and lv.status == "green":
-                    await run_agent(state, "security", ctx)
-
-        if not state.completed_at and not state.human_approval_pending:
-            state.completed_at = time.time()
-
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Resume pipeline failed for run %s", run_id)
-        state.error_message = str(exc)
-
-    return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}
+        from evals.evidence_stack import build_evidence_stack  # lazy — evals optional
+        return build_evidence_stack(state)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"evidence_stack error: {exc}")
 
 
 @app.get("/health")

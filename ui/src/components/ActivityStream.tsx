@@ -7,14 +7,17 @@ interface Props {
 }
 
 const EVENT_STYLES: Record<string, { icon: string; color: string }> = {
-  agent_start:          { icon: '▶', color: 'text-blue-400'  },
-  agent_complete:       { icon: '✓', color: 'text-green-400' },
-  gate_green:           { icon: '✓', color: 'text-green-400' },
-  gate_red:             { icon: '✗', color: 'text-red-400'   },
-  gate_retry:           { icon: '↺', color: 'text-amber-400' },
-  human_gate_pending:   { icon: '⏸', color: 'text-amber-300' },
-  human_gate_resolved:  { icon: '▶', color: 'text-green-300' },
-  run_complete:         { icon: '■', color: 'text-slate-400' },
+  agent_start:          { icon: '▶', color: 'text-blue-400'   },
+  agent_complete:       { icon: '✓', color: 'text-green-400'  },
+  gate_green:           { icon: '✓', color: 'text-green-400'  },
+  gate_red:             { icon: '✗', color: 'text-red-400'    },
+  gate_retry:           { icon: '↺', color: 'text-amber-400'  },
+  human_gate_pending:   { icon: '⏸', color: 'text-amber-300'  },
+  human_gate_resolved:  { icon: '▶', color: 'text-green-300'  },
+  run_complete:         { icon: '■', color: 'text-slate-400'  },
+  // M6
+  run_blocked:          { icon: '▲', color: 'text-rose-400'   },
+  run_returned:         { icon: '↩', color: 'text-rose-400'   },
 };
 
 function fmtTime(ts: number): string {
@@ -42,6 +45,10 @@ function eventSummary(ev: AgentEvent): string {
       return `Human gate resolved: ${ev.data?.gate_name ?? ''} — ${ev.data?.approved ? 'APPROVED' : 'REJECTED'}`;
     case 'run_complete':
       return `Run complete (${ev.data?.status ?? ''})`;
+    case 'run_blocked':
+      return `Run blocked — gate ${ev.data?.gate_name ?? ''} exhausted retries`;
+    case 'run_returned':
+      return `Run returned — ${ev.data?.reason ?? ''}`;
     default:
       return ev.event_type;
   }

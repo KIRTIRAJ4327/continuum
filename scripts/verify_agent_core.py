@@ -28,7 +28,7 @@ async def main() -> int:
     await run_agent(state, "bsa", ctx)
     checks.append(("BSA produced a story", bool(state.story and state.story.get("title"))))
     checks.append(("BSA story has spec", bool(state.story and state.story.get("spec"))))
-    checks.append(("current_agent == bsa", state.current_agent.value == "bsa"))
+    checks.append(("current_agent == bsa", getattr(state.current_agent, "value", None) == "bsa"))
 
     await run_agent(state, "architect", ctx)
     checks.append(("Architect produced a contract", bool(state.contract)))

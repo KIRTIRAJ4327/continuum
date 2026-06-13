@@ -50,6 +50,9 @@ _SKILLS_DIR = _ROOT / "skills"
 # Max LLM<->tool round-trips before we force a final answer.
 MAX_TOOL_ITERS = 5
 
+# Per-agent cost estimate when running offline (no live model).
+_OFFLINE_COST_PER_AGENT = 0.02  # USD
+
 # Parameters that are injected from the run context, never requested from the LLM.
 _INJECTED_PARAMS = {
     "neo4j_driver",
@@ -207,7 +210,6 @@ def resolve_model(spec: dict) -> Optional[Any]:
     try:
         # langchain-azure-ai 1.2.x preferred import path
         from langchain_azure_ai.chat_models import AzureChatCompletions  # type: ignore[import]
-        from langchain.chat_models import init_chat_model  # always available in langchain>=0.3
 
         endpoint = _azure_endpoint()
         api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -480,7 +482,7 @@ async def _run_offline(
         )
 
         ticket = await _call(skills.get("create_story"), ctx, state, request=state.request) or {}
-        story = {
+        story: Dict[str, Any] = {
             "title": _title_from_request(state.request),
             "description": state.request,
             "acceptance_criteria": [],
@@ -532,14 +534,14 @@ async def _run_offline(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[PLANNER] Decomposer failed: %s", exc)
 
-        result: Dict[str, Any] = {
+        plan_result: Dict[str, Any] = {
             "tasks": tasks,
             "parallel_groups": queried.get("parallel_groups", []),
             "checklist": checklist,
         }
         if decomposition_script:
-            result["decomposition_script"] = decomposition_script
-        return result
+            plan_result["decomposition_script"] = decomposition_script
+        return plan_result
 
     if role == AgentRole.DEVELOPER.value:
         code = (
@@ -1094,6 +1096,14 @@ def _sandbox_or_local_path(state: ContinuumState, ctx: AgentContext) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Cost accounting (M6)
+# --------------------------------------------------------------------------- #
+def _accrue_cost(state: ContinuumState, spec: dict) -> None:
+    """Add an estimated per-call cost to state.cost_usd (always populated)."""
+    state.cost_usd = round(state.cost_usd + _OFFLINE_COST_PER_AGENT, 4)
+
+
+# --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
 async def run_agent(
@@ -1156,6 +1166,7 @@ async def run_agent(
 
     apply_agent_output(state, role, data)
     state.current_agent = AgentRole(role)
+    _accrue_cost(state, spec)
 
     # Deterministic gates run *after* the agent. The orchestrator's _route()
     # picks up the resulting GateStatus to drive retry / escalate logic.

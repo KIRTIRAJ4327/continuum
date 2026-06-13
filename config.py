@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def get_neo4j_driver(
     uri: Optional[str] = None,
     user: Optional[str] = None,
     password: Optional[str] = None,
-) -> Optional["Neo4jDriver"]:  # type: ignore[name-defined]
+) -> Optional[Any]:  # Neo4jDriver loaded lazily; type: ignore[name-defined]
     """
     Return a Neo4jDriver connected to the configured instance, or None if the
     neo4j package is not installed or credentials are absent.

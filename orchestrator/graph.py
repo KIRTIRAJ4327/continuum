@@ -5,14 +5,13 @@
 LangGraph supervisor orchestrator for Continuum.
 Handles routing, gating, retry logic, and state management.
 """
-import asyncio
 import logging
 import time
 from typing import Callable, Optional
 
 from langgraph.graph import StateGraph, START, END
 
-from .state import ContinuumState, AgentRole, GateStatus
+from .state import ContinuumState, AgentRole
 from .agent_runner import AgentContext, run_agent
 
 logger = logging.getLogger(__name__)
@@ -49,7 +48,7 @@ class ContinuumGraph:
 
             conn = await psycopg.AsyncConnection.connect(self._checkpointer_uri)
             self.checkpointer = AsyncPostgresSaver(conn)
-            await self.checkpointer.setup()   # creates checkpoint tables on first run
+            await self.checkpointer.setup()   # type: ignore[attr-defined]
         except ImportError:
             # langgraph-checkpoint-postgres not installed; run without checkpointing
             logger.warning(

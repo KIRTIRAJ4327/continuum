@@ -6,7 +6,7 @@ from .agent_runner import AgentContext, run_agent
 try:
     from .graph import ContinuumGraph
 except ImportError:  # pragma: no cover - optional heavy dependency
-    ContinuumGraph = None  # type: ignore[assignment]
+    ContinuumGraph = None  # type: ignore[assignment, misc]
 
 __all__ = [
     "ContinuumState",

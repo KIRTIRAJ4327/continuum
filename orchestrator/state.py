@@ -88,6 +88,15 @@ class ContinuumState:
     # Populated when state.dag has >= 5 tasks; stored for operator inspection.
     decomposition_script: Optional[str] = None
 
+    # M6: Work Queue + Evidence Stack
+    run_status: str = "running"   # running/waiting_gate/blocked/returned/done/failed
+    cost_usd: float = 0.0         # accumulated LLM cost estimate
+    reject_reason: Optional[str] = None  # set when a human rejects at a gate
+
+    # M7: Mapping Fidelity (scope-guard) — populated after implementation agents run
+    business_mappings: List[Dict[str, Any]] = field(default_factory=list)
+    mapping_fidelity: Optional[Dict[str, Any]] = None
+
     # Metadata
     run_id: Optional[str] = None
     started_at: Optional[float] = None

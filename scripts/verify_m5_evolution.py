@@ -67,7 +67,7 @@ async def main() -> int:
         total_events = sum(len(v) for v in all_events.values())
         _check(
             "Pipeline run produces events",
-            total_events > 0 or (state.episodes_written or []),
+            bool(total_events > 0 or (state.episodes_written or [])),
             f"{total_events} events, {len(state.episodes_written or [])} episode(s) written",
         )
     except Exception as exc:
@@ -162,7 +162,8 @@ async def main() -> int:
         stub_path.write_text("before: placeholder content\n", encoding="utf-8")
 
         from evolution.agent import _write_pending
-        import uuid, time
+        import uuid
+        import time
         safe_proposal = {
             "id": f"evo-test-{uuid.uuid4().hex[:6]}",
             "type": "prompt_edit",
@@ -181,7 +182,7 @@ async def main() -> int:
         _write_pending(safe_proposal)
 
         from evolution.promoter import human_promote
-        result = human_promote(safe_proposal["id"])
+        result = human_promote(str(safe_proposal["id"]))
 
         _check(
             "human_promote() succeeds and verify-offline passes",
