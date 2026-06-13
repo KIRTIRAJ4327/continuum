@@ -16,6 +16,7 @@ python scripts/verify_m3_learning.py  # must print 6/6
 python scripts/verify_m5_evolution.py # must print 6/6
 python scripts/verify_m6_workqueue.py # must print 6/6
 python scripts/verify_m7_scope_guard.py # must print 2/2
+python scripts/verify_m8_repo_split.py  # must print 3/3
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -43,6 +44,7 @@ make verify-m4        # CI gate (regression block)
 make verify-m5        # 6/6 Evolution Agent
 make verify-m6        # 6/6 Work Queue + Evidence Stack
 make verify-m7        # 2/2 Mapping Fidelity / Scope-Guard
+make verify-m8        # 3/3 Two-Layer Repo Split
 
 # Tests, lint, types
 pytest -q
