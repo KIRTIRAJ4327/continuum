@@ -17,6 +17,7 @@ python scripts/verify_m5_evolution.py # must print 6/6
 python scripts/verify_m6_workqueue.py # must print 6/6
 python scripts/verify_m7_scope_guard.py # must print 2/2
 python scripts/verify_m8_repo_split.py  # must print 3/3
+python scripts/verify_m9_maf_pilot.py   # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -45,6 +46,7 @@ make verify-m5        # 6/6 Evolution Agent
 make verify-m6        # 6/6 Work Queue + Evidence Stack
 make verify-m7        # 2/2 Mapping Fidelity / Scope-Guard
 make verify-m8        # 3/3 Two-Layer Repo Split
+make verify-m9        # 6/6 MAF Harness Pilot
 
 # Tests, lint, types
 pytest -q
@@ -85,11 +87,12 @@ api/main.py  →  ContinuumGraph (orchestrator/graph.py)
                                        │
                                        ├─ resolve_model()  →  AzureChatCompletions | None
                                        │                       (None triggers offline path)
+                                       ├─ run_maf_agent()  →  MAF pilot (opted-in roles only, M9)
                                        ├─ _run_llm()       →  tool-call loop w/ retry/backoff
                                        └─ _run_offline()   →  deterministic fallback
 ```
 
-`run_agent(state, role, ctx)` is the single entry-point. It loads `agents/<role>.yaml`, resolves the model (or goes offline), calls `_run_llm()` or `_run_offline()`, then merges the result via `apply_agent_output(state, role, data)`.
+`run_agent(state, role, ctx)` is the single entry-point. It loads `agents/<role>.yaml`, resolves the model (or goes offline), then dispatches: opted-in roles (`CONTINUUM_MAF_AGENTS`) with the `agent_framework` package installed run via `run_maf_agent()` (M9 pilot); otherwise `_run_llm()`; offline → `_run_offline()`. The result is merged via `apply_agent_output(state, role, data)`. A MAF failure degrades to `_run_llm()`, then offline — never fatal.
 
 ### Routing flow
 
@@ -193,6 +196,8 @@ Proposals that would regress any eval metric are auto-rejected by the evaluator 
 | `NEO4J_URI` | Bolt URI (default `bolt://localhost:7687`) |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | Neo4j credentials |
 | `POSTGRES_DSN` | DSN for `AsyncPostgresSaver` (LangGraph checkpointing) |
+| `CONTINUUM_TARGET_REPO` | Target app repo path; M8 writes `.pdlc/` artifacts there |
+| `CONTINUUM_MAF_AGENTS` | Comma-separated roles to run on the M9 MAF pilot (e.g. `backend`); default unset → off |
 
 If none of the Azure vars are set, the pipeline runs fully offline — all verify checks pass.
 
@@ -205,4 +210,5 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **Tool errors surface as ToolMessage** — `invoke_skill()` catches exceptions and returns `{"error": "..."}` so the LLM self-corrects.
 - **Developer sub-chain order** — DATABASE before BACKEND (schema first), BACKEND before FRONTEND.
 - **Evolution is governed** — `human_promote()` is the only write path for harness changes (Rule 9). The Evolution Agent never auto-applies a proposal. `verify-offline` runs inside `human_promote()` before the change is committed; failure reverts the file and rejects the proposal.
+- **MAF pilot is dormant unless opted in (M9)** — `should_use_maf(role)` requires BOTH `CONTINUUM_MAF_AGENTS` to list the role AND the `agent_framework` package to be importable AND a live model resolved. Any MAF failure raises `MAFUnavailable` and `run_agent` falls back to `_run_llm` (then offline). The offline path never reaches MAF.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.

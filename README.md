@@ -34,7 +34,8 @@
 [![Work Queue Tests](https://img.shields.io/badge/WorkQueue_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Scope Guard Tests](https://img.shields.io/badge/ScopeGuard_Tests-2%2F2_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Repo Split Tests](https://img.shields.io/badge/RepoSplit_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M8_Complete-7C3AED?style=flat-square)]()
+[![MAF Pilot Tests](https://img.shields.io/badge/MAF_Pilot_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M9_Complete-7C3AED?style=flat-square)]()
 
 </div>
 
@@ -415,6 +416,43 @@ Proven offline in `scripts/verify_m8_repo_split.py` → 3/3 PASS.
 
 ---
 
+## 🧩 MAF Harness Pilot (M9)
+
+A pilot that runs **one opted-in agent (Backend)** on the **Microsoft Agent
+Framework**, letting MAF own the tool-calling loop instead of Continuum's
+hand-rolled `_run_llm` loop. **Opt-in, default-off, and never fatal.**
+
+```
+run_agent(role)
+   │
+   ├─ model is None ───────────────────────────► _run_offline()   (offline path)
+   │
+   └─ model resolved
+         │
+         ├─ should_use_maf(role)?  ── requires ALL of:
+         │     • role ∈ CONTINUUM_MAF_AGENTS   (opt-in)
+         │     • agent_framework importable     (installed)
+         │     • live model resolved            (creds present)
+         │        │
+         │        ├─ yes ─► run_maf_agent()  ──(MAFUnavailable / error)──┐
+         │        │                                                      │
+         │        └─ no ───────────────────────────────────────────────►├─► _run_llm()
+         │                                                               │   (LangChain loop)
+         └───────────────────────────────────────────────────────────  ┘
+```
+
+- **`orchestrator/maf_runner.py`** — `should_use_maf()`, `run_maf_agent()`,
+  `MAFUnavailable`; lazily imports `agent_framework`, wraps skills as MAF tools.
+- **`CONTINUUM_MAF_AGENTS`** env var — comma-separated roles (e.g. `backend`);
+  unset → the pilot is dormant for every agent.
+- **Graceful degradation** — any MAF problem raises `MAFUnavailable` and
+  `run_agent` falls back to the LangChain loop, then to the offline path. The
+  offline path never reaches MAF.
+
+Proven offline in `scripts/verify_m9_maf_pilot.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -443,7 +481,10 @@ M7 ──── Mapping Fidelity · D11 Scope-Guard
   │     ✅  business_mappings enforced post-implementation · 2/2 PASS
   │
 M8 ──── Two-Layer Repo Split · D33 .pdlc/ artifacts
-        ✅  Layer 1 / Layer 2 separation · emit_pdlc_artifacts · 3/3 PASS
+  │     ✅  Layer 1 / Layer 2 separation · emit_pdlc_artifacts · 3/3 PASS
+  │
+M9 ──── MAF Harness Pilot · Backend agent on Microsoft Agent Framework
+        ✅  opt-in, default-off · graceful fallback to LangChain loop · 6/6 PASS
 ```
 
 ---
@@ -521,6 +562,7 @@ make verify-m5        # evolution agent (governed harness mutation)
 make verify-m6        # work queue + evidence stack + run metrics
 make verify-m7        # mapping fidelity / scope-guard
 make verify-m8        # two-layer repo split / .pdlc/ artifacts
+make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 ```
 
 | Script | Checks | Result |
@@ -533,8 +575,9 @@ make verify-m8        # two-layer repo split / .pdlc/ artifacts
 | `scripts/verify_m6_workqueue.py` | cost accrual · run_status · reject · blocked · evidence | 6/6 ✅ |
 | `scripts/verify_m7_scope_guard.py` | exact match → green · extra code → red/blocked | 2/2 ✅ |
 | `scripts/verify_m8_repo_split.py` | layer-2 placeholder · pdlc write · evidence.json | 3/3 ✅ |
+| `scripts/verify_m9_maf_pilot.py` | capability gate · opt-in · fallback routing | 6/6 ✅ |
 
-> All 8 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
+> All 9 suites pass with **zero external credentials** — Azure, Neo4j, ADO, and the MAF framework are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
 ---
 
@@ -566,7 +609,9 @@ continuum/
 │   ├── gates.py           #   ruff · mypy · pytest · bandit · OpenAPI validator
 │   ├── state.py           #   ContinuumState · GateStatus · AgentRole enum
 │   ├── events.py          #   in-memory SSE event bus with history replay
-│   └── decomposer.py      #   dynamic fan-out for DAGs >= 5 tasks
+│   ├── decomposer.py      #   dynamic fan-out for DAGs >= 5 tasks
+│   ├── pdlc.py            #   M8: emit .pdlc/ artifacts to target repo
+│   └── maf_runner.py      #   M9: Microsoft Agent Framework pilot (opt-in)
 ├── agents/                # YAML spec per agent (instructions · skills · tier)
 ├── skills/                # versioned atoms — skills/{name}/v1.0/skill.py
 ├── harness/               # PEV loop · sensors · permissions · ci-mirror.Dockerfile

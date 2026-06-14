@@ -16,6 +16,62 @@ Entry format:
 
 ---
 
+## 2026-06-14 — M9: MAF Harness Pilot (M9)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+
+**What:** Implemented M9 from `M6-M10-Upgrade-Plan.md`. Piloted an alternative
+agent-execution path on the Microsoft Agent Framework (MAF) for one opted-in
+agent (Backend), letting MAF own the tool-calling loop instead of the hand-rolled
+`_run_llm` loop. The pilot is **opt-in (default off)**, gated on both the
+`CONTINUUM_MAF_AGENTS` env flag AND the `agent_framework` package being importable
+AND a live model being resolved. Any MAF problem degrades to the LangChain loop,
+then offline — so a missing/broken MAF install can never break a run. In the
+offline/thin environment the pilot is fully dormant and the deterministic path is
+byte-for-byte unchanged.
+
+**Files:**
+- `orchestrator/maf_runner.py` (new) — `MAFUnavailable`, `maf_enabled_roles()`,
+  `maf_package_available()` (cached), `should_use_maf(role)`, `maf_tool_specs()`,
+  `run_maf_agent(spec, state, skills, ctx)`. Lazily imports `agent_framework`;
+  reuses `agent_runner`'s prompt/parse/skill-invocation helpers via deferred
+  imports (no import cycle).
+- `orchestrator/agent_runner.py` — `run_agent()` dispatch now routes opted-in
+  roles to `run_maf_agent()`, with `MAFUnavailable` → `_run_llm` fallback inside
+  the existing outer try (which still falls back to offline).
+- `scripts/verify_m9_maf_pilot.py` (new) + `Makefile` `verify-m9` target.
+- `CLAUDE.md` — execution-model diagram + dispatch description updated; new env
+  vars (`CONTINUUM_MAF_AGENTS`, `CONTINUUM_TARGET_REPO`); new MAF invariant; added
+  `verify_m9_maf_pilot.py` to non-negotiable rules.
+
+**Verification:**
+- `python scripts/verify_agent_core.py` → 11/11 PASS
+- `python scripts/verify_m0_loop.py` → 3/3 PASS
+- `python scripts/verify_m3_learning.py` → 6/6 PASS
+- `python scripts/verify_m5_evolution.py` → 6/6 PASS
+- `python scripts/verify_m6_workqueue.py` → 6/6 PASS
+- `python scripts/verify_m7_scope_guard.py` → 2/2 PASS
+- `python scripts/verify_m8_repo_split.py` → 3/3 PASS
+- `python scripts/verify_m9_maf_pilot.py` → 6/6 PASS
+- `python evals/ci_gate.py` → exit 0 (no regression vs baseline)
+- `cd ui && npm run build` → clean (328 kB bundle)
+
+**Notes / follow-ups:**
+- MAF (`agent-framework`) is an optional live-only dependency — not installed in
+  the canonical offline env, and there are no Azure creds here, so the *live* MAF
+  call cannot be exercised in this environment. This mirrors how Azure/Neo4j/ADO
+  live paths are already handled: lazily imported, best-effort, always with a
+  deterministic fallback. The verify script proves the parts that ARE offline-
+  testable: capability gating, opt-in semantics, env parsing, `MAFUnavailable`
+  on missing package, and the MAF→LangChain fallback routing (via monkeypatch).
+- The MAF API surface (`AzureOpenAIChatClient.create_agent(...).run(...)`) is
+  pinned to the published `agent-framework` package; every MAF call is wrapped so
+  any API drift raises `MAFUnavailable` and falls back rather than crashing.
+- **Next:** M10 (ASSERT / Rubric Eval Integration) — replace
+  `evals/scorers/judge.py` with ASSERT specs for Rules 1–9 + the M7 scope
+  invariant; keep the `pass^k` runner. See `M6-M10-Upgrade-Plan.md`.
+
+---
+
 ## 2026-06-13 — M8: Two-Layer Repo Split / .pdlc/ (M8)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 
