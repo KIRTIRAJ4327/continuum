@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from orchestrator.agent_runner import AgentContext, run_agent
@@ -32,6 +32,7 @@ from orchestrator.gates import gate_scope_conformance, update_gate_status
 from orchestrator.pdlc import emit_pdlc_artifacts
 from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
+from api.compliance import build_compliance_report, render_compliance_html
 
 logger = logging.getLogger(__name__)
 
@@ -710,6 +711,25 @@ async def get_evidence(run_id: str) -> Dict[str, Any]:
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return {"run_id": run_id, "evidence": build_evidence_stack(state)}
+
+
+@app.get("/runs/{run_id}/compliance-report")
+async def get_compliance_report(run_id: str) -> Dict[str, Any]:
+    """M12: structured, auditor-readable compliance artifact for a run (JSON)."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return build_compliance_report(run_id, state)
+
+
+@app.get("/runs/{run_id}/compliance-report.html", response_class=HTMLResponse)
+async def get_compliance_report_html(run_id: str) -> HTMLResponse:
+    """M12: the same compliance report rendered as a standalone HTML page."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    report = build_compliance_report(run_id, state)
+    return HTMLResponse(content=render_compliance_html(report))
 
 
 @app.get("/health")

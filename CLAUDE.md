@@ -22,6 +22,7 @@ python scripts/verify_m8_repo_split.py  # must print 3/3
 python scripts/verify_m9_maf_pilot.py   # must print 6/6
 python scripts/verify_m10_assert.py     # must print 6/6
 python scripts/verify_m11_spec_registry.py # must print 4/4
+python scripts/verify_m12_compliance.py     # must print 3/3
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -53,6 +54,7 @@ make verify-m8        # 3/3 Two-Layer Repo Split
 make verify-m9        # 6/6 MAF Harness Pilot
 make verify-m10       # 6/6 ASSERT / Rubric Eval Integration
 make verify-m11       # 4/4 Spec Registry
+make verify-m12       # 3/3 Compliance Report
 
 # Tests, lint, types
 pytest -q
@@ -213,17 +215,31 @@ chain. `specs_match()` (stable keys: `api_endpoints`, `data_entities`,
 `out_of_scope`) is the single source of truth for conformance, shared by the write
 skill and the gate.
 
-## Roadmap (M12–M14) — not yet implemented
+### Compliance Report (`api/compliance.py`, M12)
 
-The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11 is shipped (see the Spec
-Registry architecture section above). These are **planned** — no code exists yet, so
-do **not** add their verify scripts to the non-negotiable list until they exist and
-pass. Guard-rails for the implementing session (one milestone per feature branch →
-PR to `dev`, per PRD §12):
+`build_compliance_report(run_id, state, events=None)` assembles an auditor-readable
+artifact for a run — **packaging, not new capability**. Eight sections, always
+present and in `SECTION_ORDER`: `run_metadata`, `spec` (prefers the M11 Registry,
+falls back to work-item state), `business_mappings` (+ scope-guard conformance),
+`gate_decisions` (human G1/G2 + automated gates), `evidence_stack` (reuses
+`build_evidence_stack`), `audit_trail` (event-bus history, injectable), `versions`
+(`git describe` + model mode/tiers), and `compliance_assertions` (a boolean checklist
++ `passed`). When data is absent it is an explicit `null`/`[]` **with a
+`_missing_reason`**, enumerated in the top-level `missing` list — never silently
+omitted (`complete == (missing == [])`). Pure/offline: the audit trail reads the
+in-memory event bus when not injected; `config`/`git` are best-effort lazy lookups.
+`GET /runs/{run_id}/compliance-report` (JSON) and `…/compliance-report.html`
+(`render_compliance_html`). Approver identity/timestamps are explicit nulls until
+auth lands (P0.3).
 
-- **M12 Compliance Report** (Spine) — `api/compliance.py` `build_compliance_report(run_id, state)`
-  reusing `build_evidence_stack`; `GET /runs/{run_id}/compliance-report`. Packaging,
-  not new capability. Target: `verify_m12_compliance.py` 3/3.
+## Roadmap (M13–M14) — not yet implemented
+
+The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11 and M12 are shipped (see the
+Spec Registry and Compliance Report architecture sections above). These are
+**planned** — no code exists yet, so do **not** add their verify scripts to the
+non-negotiable list until they exist and pass. Guard-rails for the implementing
+session (one milestone per feature branch → PR to `dev`, per PRD §12):
+
 - **M13 15-State Machine** (Frontier, gated on M11+M12) — `orchestrator/state_machine.py`
   + `orchestrator/policy_engine.py` `can_transition(artifact, from_state, to_state) -> (bool, reason)`;
   `lifecycle_state` becomes the artifact's system of record; G1–G4 named gates. This
@@ -315,4 +331,5 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **ASSERT rubric is deterministic + offline (M10)** — `evals/assert_specs.py` specs are pure predicates over state/harness; `judge.score()` never needs credentials. The optional Azure 1–5 rating is a secondary `llm_rating` calibration signal, never the score. A buggy spec is caught and converted to a deterministic `fail` (`_safe_check`), so it can't crash the eval.
 - **OTel export is dormant unless opted in (M10)** — `event_bus.emit()` mirrors events onto OTel spans only when `CONTINUUM_OTEL` is truthy AND `opentelemetry` imports; otherwise `_otel_emit()` is a no-op. Any OTel error is swallowed — telemetry can never break a run, and the offline path never imports OTel.
 - **Spec Registry is append-only + offline-safe (M11)** — `graph_db/spec_registry.py` never edits a spec in place; a materially different spec creates a new version that SUPERSEDES the prior. The module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with no Neo4j; the live Neo4j path runs only when a *connected* driver is passed (`_is_live()`) and any error falls back to the store. The M11 scope-guard branch only fires when `state.registry_current_before` is set, so M0–M10 runs are byte-unchanged. `specs_match()` is the single conformance predicate shared by the write skill and the gate.
+- **Compliance Report is total + honest (M12)** — `build_compliance_report()` always returns all 8 sections; absent data is an explicit `null`/`[]` with a `_missing_reason` and is listed in `missing` (never silently dropped). It is pure/offline (event-bus audit trail, lazy `config`/`git`), reuses `build_evidence_stack`, and never asserts more than the run actually proved — a blocked/returned run yields a valid report whose `compliance_assertions.passed` is honestly `False`.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
