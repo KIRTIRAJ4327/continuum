@@ -888,10 +888,18 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
 
     if role == AgentRole.DEVELOPER.value:
         target = _sandbox_or_local_path(state, ctx)
-        passed, output = await gates.gate_local_verify(target)
-        gates.update_gate_status(state, "local_verify", passed, output)
-        await _gate_event("local_verify", passed, output)
-        logger.info("[GATE] local_verify=%s (%s)", "green" if passed else "red", target)
+        # P1.1: run the three independent gates once, record each as its own
+        # evidence, then derive the composite `local_verify` the retry loop keys on.
+        split = await gates.gate_local_verify_split(target)
+        for gname, (ok, out) in split.items():
+            gates.update_gate_status(state, gname, ok, out)
+        passed = all(ok for ok, _ in split.values())
+        combined = "; ".join(
+            f"{name}={'green' if ok else 'red'}" for name, (ok, _) in split.items()
+        )
+        gates.update_gate_status(state, "local_verify", passed, combined)
+        await _gate_event("local_verify", passed, combined)
+        logger.info("[GATE] local_verify=%s (%s) [%s]", "green" if passed else "red", target, combined)
 
     elif role == AgentRole.SECURITY.value:
         target = _sandbox_or_local_path(state, ctx)
