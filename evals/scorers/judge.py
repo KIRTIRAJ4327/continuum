@@ -1,12 +1,31 @@
 """
-LLM-as-judge scorer (~30% weight in the eval mix).
+Rubric scorer (~30% weight in the eval mix) — ASSERT-based as of M10.
 
-Live path:   Azure OpenAI rates BSA story quality 1-5.
-Offline path: heuristic based on word count and acceptance-criteria count.
+Historically this was a bespoke Azure 1–5 LLM "judge" of BSA story quality. M10
+replaces that opaque rating with declarative ASSERT specs (see
+`evals/assert_specs.py`): one or more machine-checkable rubrics per governance
+Rule (1–9) plus the M7 scope invariant. The primary `value` is now the weighted
+pass rate over the *applicable trial specs* for the state — fully deterministic
+and offline.
 
-Calibration tracking:
-  judge_score and deterministic_story_score are stored in results so the
-  pipeline can flag disagreements for human review (see human.py).
+The public contract is unchanged so `pass_k_runner.py`, `ci_gate.py`, and
+`human.py` keep working untouched:
+
+    score(state, label) -> {
+        "value": float,                # [0,1] — ASSERT weighted pass rate
+        "reason": str,
+        "method": "assert" | "assert+llm",
+        "specs": {id: {...}},          # NEW: per-spec verdicts (auditable)
+        "heuristic_value": float,      # kept for back-compat (== value offline)
+        "needs_human_review": bool,    # True when any spec fails / LLM disagrees
+        "llm_rating": int | None,      # optional 1–5 enrichment when live
+    }
+
+Live enrichment: when Azure credentials are present we still ask the model for a
+1–5 story-quality rating, but only as a *secondary signal* surfaced under
+`llm_rating` and used to flag calibration disagreements — it no longer drives the
+score. With no credentials the call is skipped and the result is identical every
+run.
 """
 from __future__ import annotations
 
@@ -14,76 +33,38 @@ import logging
 import os
 from typing import Any, Dict, Optional, Tuple
 
+from evals.assert_specs import evaluate_specs
 from orchestrator.state import ContinuumState
 
 logger = logging.getLogger(__name__)
 
-# Threshold below which LLM and heuristic are considered "disagreeing".
+# A 1–5 LLM rating this far (normalised) from the ASSERT score → flag for review.
 _DISAGREE_THRESHOLD = 0.25
 
 
-def _heuristic_score(state: ContinuumState) -> Tuple[float, str]:
+def _assert_reason(result: Dict[str, Any]) -> str:
+    """One-line human summary of the ASSERT verdicts."""
+    n_pass = result["n_pass"]
+    n_app = result["n_applicable"]
+    base = f"assert: {n_pass}/{n_app} trial specs pass"
+    fails = [
+        f"{v['rule']} ({v['detail']})"
+        for v in result["specs"].values()
+        if v["verdict"] == "fail"
+    ]
+    if fails:
+        return base + " — FAIL: " + "; ".join(fails[:3])
+    return base
+
+
+async def _llm_rating(state: ContinuumState) -> Optional[int]:
     """
-    Offline fallback: score BSA story quality via cheap structural heuristics.
-
-    Scoring rubric (max 5 points, normalised to [0, 1]):
-      +1  title is present and non-trivial (>= 5 words)
-      +1  description is present and non-trivial (>= 20 words)
-      +1  at least 2 acceptance criteria
-      +1  at least 4 acceptance criteria
-      +1  spec block present (overview + key_concepts)
-    """
-    story = state.story or {}
-    points = 0.0
-    reasons = []
-
-    title = (story.get("title") or "").strip()
-    if len(title.split()) >= 5:
-        points += 1
-        reasons.append("title>=5words")
-    elif title:
-        points += 0.5
-        reasons.append("title_short")
-
-    description = (story.get("description") or "").strip()
-    if len(description.split()) >= 20:
-        points += 1
-        reasons.append("desc>=20words")
-    elif description:
-        points += 0.5
-        reasons.append("desc_short")
-
-    ac = story.get("acceptance_criteria") or []
-    if not isinstance(ac, list):
-        ac = []
-    if len(ac) >= 4:
-        points += 2
-        reasons.append(f"ac={len(ac)}")
-    elif len(ac) >= 2:
-        points += 1
-        reasons.append(f"ac={len(ac)}")
-
-    spec = story.get("spec") or {}
-    if spec.get("overview") and spec.get("key_concepts"):
-        points += 1
-        reasons.append("spec_complete")
-    elif spec.get("overview"):
-        points += 0.5
-        reasons.append("spec_partial")
-
-    normalized = round(points / 5.0, 4)
-    return normalized, "heuristic: " + ", ".join(reasons) if reasons else "heuristic: empty story"
-
-
-async def _llm_score(state: ContinuumState) -> Optional[Tuple[float, str]]:
-    """
-    Call Azure OpenAI to rate the BSA story 1-5.
-    Returns None if credentials are absent or call fails.
+    Optional live enrichment: ask Azure OpenAI for a 1–5 story-quality rating.
+    Returns None when credentials are absent or the call fails. Never raises.
     """
     api_key = os.getenv("AZURE_OPENAI_API_KEY", "")
     endpoint = os.getenv("AZURE_AI_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
     deployment = os.getenv("AZURE_DEPLOYMENT_CHEAP") or os.getenv("AZURE_DEPLOYMENT_STRONG") or ""
-
     if not (api_key and endpoint and deployment):
         return None
 
@@ -91,45 +72,30 @@ async def _llm_score(state: ContinuumState) -> Optional[Tuple[float, str]]:
     story_text = (
         f"Title: {story.get('title', '')}\n"
         f"Description: {story.get('description', '')}\n"
-        f"Acceptance Criteria:\n"
+        "Acceptance Criteria:\n"
         + "\n".join(f"- {ac}" for ac in (story.get("acceptance_criteria") or []))
-        + f"\n\nSpec overview: {(story.get('spec') or {}).get('overview', '')}"
     )
-
     prompt = (
-        "You are evaluating a user story produced by an AI Business Analyst.\n\n"
-        "Rate the story from 1 to 5 on completeness and clarity:\n"
-        "  1 = missing title or acceptance criteria\n"
-        "  2 = minimal content, unclear scope\n"
-        "  3 = adequate — covers main use case, has some AC\n"
-        "  4 = good — clear title, 3+ AC, scoped spec\n"
-        "  5 = excellent — detailed AC, measurable criteria, edge cases covered\n\n"
-        "Respond with ONLY a single integer (1-5). No explanation.\n\n"
+        "Rate this AI-generated user story 1-5 on completeness and clarity. "
+        "Respond with ONLY a single integer (1-5).\n\n"
         f"Story:\n{story_text[:2000]}"
     )
-
     try:
         import httpx
         url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version=2024-08-01-preview"
-        payload = {
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 5,
-            "temperature": 0,
-        }
+        payload = {"messages": [{"role": "user", "content": prompt}], "max_tokens": 5, "temperature": 0}
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                url,
-                json=payload,
+                url, json=payload,
                 headers={"api-key": api_key, "Content-Type": "application/json"},
             )
         if resp.status_code == 200:
             raw = resp.json()["choices"][0]["message"]["content"].strip()
-            rating = int(raw[0])  # first char is the digit
+            rating = int(raw[0])
             if 1 <= rating <= 5:
-                normalized = (rating - 1) / 4.0  # map 1-5 → 0-1
-                return round(normalized, 4), f"llm_judge: rating={rating}/5"
+                return rating
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[judge] LLM call failed: %s", exc)
+        logger.warning("[judge] LLM enrichment failed: %s", exc)
     return None
 
 
@@ -137,36 +103,40 @@ async def score(
     state: ContinuumState,
     label: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Score story quality using LLM judge with heuristic fallback.
+    """Score a run against the ASSERT trial specs (with optional LLM enrichment)."""
+    result = evaluate_specs(state, label)
+    value: float = result["value"]
+    needs_review = result["n_fail"] > 0
 
-    Returns:
-        {
-            "value": float,       # [0, 1]
-            "reason": str,
-            "method": "llm" | "heuristic",
-            "needs_human_review": bool,
-        }
-    """
-    heuristic_val, heuristic_reason = _heuristic_score(state)
-
-    llm_result = await _llm_score(state)
-    if llm_result is not None:
-        llm_val, llm_reason = llm_result
-        # Flag for human review when LLM and heuristic disagree significantly.
-        needs_review = abs(llm_val - heuristic_val) >= _DISAGREE_THRESHOLD
+    rating = await _llm_rating(state)
+    if rating is not None:
+        llm_norm = (rating - 1) / 4.0  # map 1–5 → 0–1
+        # Flag calibration disagreement between the rubric and the LLM's gestalt.
+        if abs(llm_norm - value) >= _DISAGREE_THRESHOLD:
+            needs_review = True
         return {
-            "value": llm_val,
-            "reason": llm_reason,
-            "method": "llm",
-            "heuristic_value": heuristic_val,
+            "value": value,
+            "reason": _assert_reason(result) + f"; llm_rating={rating}/5",
+            "method": "assert+llm",
+            "specs": result["specs"],
+            "heuristic_value": value,
             "needs_human_review": needs_review,
+            "llm_rating": rating,
         }
 
     return {
-        "value": heuristic_val,
-        "reason": heuristic_reason,
-        "method": "heuristic",
-        "heuristic_value": heuristic_val,
-        "needs_human_review": False,
+        "value": value,
+        "reason": _assert_reason(result),
+        "method": "assert",
+        "specs": result["specs"],
+        "heuristic_value": value,
+        "needs_human_review": needs_review,
+        "llm_rating": None,
     }
+
+
+# Backwards-compatible alias: some callers/tests imported the private heuristic.
+def _heuristic_score(state: ContinuumState) -> Tuple[float, str]:
+    """Deprecated shim — returns the ASSERT trial score as a (value, reason) pair."""
+    result = evaluate_specs(state, {})
+    return result["value"], _assert_reason(result)

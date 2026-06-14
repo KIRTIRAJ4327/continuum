@@ -2,8 +2,8 @@
   "det_weighted": 0.65,
   "per_trial_rate": 0.0,
   "pass_k_rate": 0.0,
-  "judge_avg": 0.4,
+  "judge_avg": 1.0,
   "n_cases": 5,
   "k": 3,
-  "timestamp": 1780888318
+  "timestamp": 1781419145
 }

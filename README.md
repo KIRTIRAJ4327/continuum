@@ -35,7 +35,8 @@
 [![Scope Guard Tests](https://img.shields.io/badge/ScopeGuard_Tests-2%2F2_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Repo Split Tests](https://img.shields.io/badge/RepoSplit_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![MAF Pilot Tests](https://img.shields.io/badge/MAF_Pilot_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M9_Complete-7C3AED?style=flat-square)]()
+[![ASSERT Eval Tests](https://img.shields.io/badge/ASSERT_Eval_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M10_Complete-7C3AED?style=flat-square)]()
 
 </div>
 
@@ -261,8 +262,14 @@ Example: 70%-per-trial agent
 | Layer | Weight | What it scores | Needs credentials? |
 |-------|--------|---------------|--------------------|
 | Deterministic | ~60% | `contract_valid`, `sast_clean`, `story_has_ac`, `dag_has_tasks`, `code_has_files`, `schema_has_tables` | ❌ No |
-| LLM Judge | ~30% | BSA story quality (1–5 rating), heuristic fallback offline | Optional |
-| Human Queue | ~10% | Items where judge and deterministic disagree ≥25pp | Manual |
+| ASSERT rubric (M10) | ~30% | Machine-checkable specs, one+ per Rule 1–9 + M7 scope; weighted pass rate over applicable trial specs. Optional 1–5 LLM rating kept only as a calibration signal | ❌ No |
+| Human Queue | ~10% | Items where the rubric flags a failing spec / LLM disagreement | Manual |
+
+**ASSERT specs (M10):** `evals/assert_specs.py` replaces the opaque 1–5 judge with
+declarative rubrics. *Trial* specs (Rules 1, 2, 4, 8 + M7 scope) grade each run's
+state; *governance* specs (Rules 3, 5, 6, 7, 9) grade the harness itself. Each spec
+is a pure `check(state) -> (pass|fail|na, detail)` — no LLM, no network. The Evidence
+Stack annotates each layer with the rubric verdict backing it.
 
 **CI Gate:** first run writes `evals/results/baseline.json`; subsequent runs exit 1 if any metric regresses >2pp. Proven: artificially inflate baseline by 15pp → `exit 1`. Restore → `exit 0`.
 
@@ -453,6 +460,33 @@ Proven offline in `scripts/verify_m9_maf_pilot.py` → 6/6 PASS.
 
 ---
 
+## ✅ ASSERT / Rubric Eval (M10)
+
+The opaque 1–5 LLM "judge" is replaced by **declarative, machine-checkable rubrics**
+— one or more per governance Rule (1–9) plus the M7 scope invariant.
+
+```
+evals/assert_specs.py
+  TRIAL_SPECS       graded per run:   Rule 1 (never push & pray) · Rule 2 (every
+                                      stage is a gate) · Rule 4 (bounded auto-fix) ·
+                                      Rule 8 (plans are contracts) · M7 scope
+  GOVERNANCE_SPECS  graded on harness: Rule 3 · Rule 5 · Rule 6 · Rule 7 · Rule 9
+
+  each spec → check(state) -> (pass | fail | na, detail)     # pure, offline, no LLM
+```
+
+- **`evals/scorers/judge.py`** now reports the weighted pass rate over applicable
+  trial specs. The optional Azure 1–5 rating survives only as a secondary
+  `llm_rating` calibration signal — it no longer drives the score.
+- **Evidence Stack** layers are annotated with the rubric verdict backing them
+  (`build_evidence_stack(state, asserts=...)`).
+- **`CONTINUUM_OTEL`** — opt-in, offline-safe OpenTelemetry export from the event
+  bus; a no-op unless the flag is set *and* `opentelemetry` is installed.
+
+Proven offline in `scripts/verify_m10_assert.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -484,7 +518,10 @@ M8 ──── Two-Layer Repo Split · D33 .pdlc/ artifacts
   │     ✅  Layer 1 / Layer 2 separation · emit_pdlc_artifacts · 3/3 PASS
   │
 M9 ──── MAF Harness Pilot · Backend agent on Microsoft Agent Framework
-        ✅  opt-in, default-off · graceful fallback to LangChain loop · 6/6 PASS
+  │     ✅  opt-in, default-off · graceful fallback to LangChain loop · 6/6 PASS
+  │
+M10 ─── ASSERT / Rubric Eval Integration · specs for Rules 1–9 + M7 scope
+        ✅  declarative machine-checkable rubrics · opt-in OTel export · 6/6 PASS
 ```
 
 ---
@@ -563,6 +600,7 @@ make verify-m6        # work queue + evidence stack + run metrics
 make verify-m7        # mapping fidelity / scope-guard
 make verify-m8        # two-layer repo split / .pdlc/ artifacts
 make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
+make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 ```
 
 | Script | Checks | Result |
@@ -576,8 +614,9 @@ make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 | `scripts/verify_m7_scope_guard.py` | exact match → green · extra code → red/blocked | 2/2 ✅ |
 | `scripts/verify_m8_repo_split.py` | layer-2 placeholder · pdlc write · evidence.json | 3/3 ✅ |
 | `scripts/verify_m9_maf_pilot.py` | capability gate · opt-in · fallback routing | 6/6 ✅ |
+| `scripts/verify_m10_assert.py` | rule coverage · spec discrimination · 3-valued scope · OTel no-op | 6/6 ✅ |
 
-> All 9 suites pass with **zero external credentials** — Azure, Neo4j, ADO, and the MAF framework are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 10 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
 ---
 

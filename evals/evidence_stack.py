@@ -24,6 +24,18 @@ from typing import Any, Dict, List, Optional
 # Number of layers the stack always returns (consumers rely on this).
 EVIDENCE_LAYER_COUNT = 6
 
+# M10: which ASSERT spec backs each layer (by 1-based layer index → spec id).
+# Used only when `build_evidence_stack` is called with an `asserts` mapping;
+# absent that, the stack is identical to its pre-M10 shape.
+_LAYER_SPEC = {
+    1: "rule1_no_push_and_pray",
+    2: "rule1_no_push_and_pray",
+    3: "rule8_plans_are_contracts",
+    4: "m7_scope_fidelity",
+    5: "rule2_every_stage_gate",
+    6: "rule9_governed_harness",
+}
+
 
 def _gate(state: Any, name: str) -> Optional[Any]:
     """Return the named GateStatus on the state, or None."""
@@ -87,12 +99,21 @@ def _scope_detail(state: Any) -> str:
     return "; ".join(parts) if parts else "scope mismatch"
 
 
-def build_evidence_stack(state: Any) -> List[Dict[str, str]]:
+def build_evidence_stack(
+    state: Any,
+    asserts: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, str]]:
     """
     Build the 6-layer Evidence Stack for a run. Pure, offline-safe.
 
     Always returns exactly EVIDENCE_LAYER_COUNT entries, even for a run that
     has not produced any gates yet (every layer then reads "pending").
+
+    M10: when `asserts` is supplied (the `specs` mapping from
+    `evals.assert_specs.evaluate_all(state)`), each layer is annotated with the
+    machine-checked rubric verdict backing it (`assert_rule` + `assert_verdict`).
+    Omitting `asserts` yields the exact pre-M10 shape (six layers, no extra keys)
+    so existing callers and verifiers are unaffected.
     """
     local_verify = _gate(state, "local_verify")
     contract = _gate(state, "contract_validate")
@@ -113,7 +134,7 @@ def build_evidence_stack(state: Any) -> List[Dict[str, str]]:
     else:
         human_status, human_detail = "pending", "awaiting human review"
 
-    return [
+    layers = [
         {
             "layer": "Build / compile",
             "sublabel": "ruff + mypy + py_compile",
@@ -151,3 +172,13 @@ def build_evidence_stack(state: Any) -> List[Dict[str, str]]:
             "detail": human_detail,
         },
     ]
+
+    # M10: annotate each layer with the ASSERT rubric verdict backing it.
+    if asserts:
+        for idx, layer in enumerate(layers, start=1):
+            spec = asserts.get(_LAYER_SPEC.get(idx, ""))
+            if spec:
+                layer["assert_rule"] = spec.get("rule", "")
+                layer["assert_verdict"] = spec.get("verdict", "")
+
+    return layers

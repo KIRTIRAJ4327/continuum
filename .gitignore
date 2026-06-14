@@ -34,6 +34,7 @@ ui/Tempnpm-cache/
 
 # Transient verifier / eval artifacts (baseline.json is the tracked snapshot)
 evals/results/ci_*.json
+evals/results/pass_k_*.json
 evolution/proposals/**/evo-test-*.json
 # Pending proposals are intermediate artifacts; only promoted (applied/) ones matter
 evolution/proposals/pending/

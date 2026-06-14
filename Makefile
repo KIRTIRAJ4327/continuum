@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -19,6 +19,7 @@ help:
 	@echo "  make verify-m7      — Run M7 Mapping Fidelity / Scope-Guard demo (2/2)"
 	@echo "  make verify-m8      — Run M8 Two-Layer Repo Split demo (3/3)"
 	@echo "  make verify-m9      — Run M9 MAF Harness Pilot demo (6/6)"
+	@echo "  make verify-m10     — Run M10 ASSERT / Rubric Eval demo (6/6)"
 	@echo "  make evo-observe    — Print current failure patterns from event history"
 	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
 	@echo "  make evo-promote    — List pending proposals; apply by ID"
@@ -103,6 +104,10 @@ verify-m8:
 verify-m9:
 	@echo "Running M9 MAF Harness Pilot verification (6/6)..."
 	python scripts/verify_m9_maf_pilot.py
+
+verify-m10:
+	@echo "Running M10 ASSERT / Rubric Eval verification (6/6)..."
+	python scripts/verify_m10_assert.py
 
 evo-observe:
 	@echo "Current failure patterns from event history:"

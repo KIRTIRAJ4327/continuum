@@ -23,13 +23,76 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Maximum events stored per run (prevents unbounded memory growth).
 _MAX_LOG = 500
+
+
+# --------------------------------------------------------------------------- #
+# M10: optional OpenTelemetry export (offline-safe, opt-in, best-effort)
+# --------------------------------------------------------------------------- #
+# Every event the bus broadcasts is *also* mirrored onto an OTel span event when
+# BOTH (a) CONTINUUM_OTEL is truthy AND (b) the `opentelemetry-api` package is
+# importable. Absent either, `_otel_emit` is a no-op — the canonical offline
+# path never imports OTel and never changes behaviour. Any OTel error is
+# swallowed so telemetry can never break a run.
+_OTEL_ENV_FLAG = "CONTINUUM_OTEL"
+_otel_tracer: Any = None
+_otel_checked = False
+
+
+def otel_enabled() -> bool:
+    """True iff OTel export is opted in via env AND the package is importable."""
+    if not os.getenv(_OTEL_ENV_FLAG):
+        return False
+    return _get_tracer() is not None
+
+
+def _get_tracer() -> Optional[Any]:
+    """Lazily resolve an OTel tracer; cache the (possibly None) result."""
+    global _otel_tracer, _otel_checked
+    if _otel_checked:
+        return _otel_tracer
+    _otel_checked = True
+    try:
+        from opentelemetry import trace  # type: ignore[import]
+
+        _otel_tracer = trace.get_tracer("continuum.events")
+    except Exception:  # noqa: BLE001 — package absent or misconfigured → no-op
+        _otel_tracer = None
+    return _otel_tracer
+
+
+def _otel_emit(run_id: str, event: Dict[str, Any]) -> None:
+    """Mirror an event onto an OTel span event. No-op unless opted in + installed."""
+    if not os.getenv(_OTEL_ENV_FLAG):
+        return
+    tracer = _get_tracer()
+    if tracer is None:
+        return
+    try:
+        et = str(event.get("event_type", "event"))
+        with tracer.start_as_current_span(f"continuum.{et}") as span:
+            span.set_attribute("continuum.run_id", run_id)
+            span.set_attribute("continuum.event_type", et)
+            if event.get("agent"):
+                span.set_attribute("continuum.agent", str(event["agent"]))
+            if event.get("gate"):
+                span.set_attribute("continuum.gate", str(event["gate"]))
+    except Exception:  # noqa: BLE001 — telemetry must never break a run
+        pass
+
+
+def _reset_otel_cache() -> None:
+    """Test hook: clear the cached tracer so env changes take effect."""
+    global _otel_tracer, _otel_checked
+    _otel_tracer = None
+    _otel_checked = False
 
 # Event types are plain `event_type` strings on the emitted dict — there is no
 # enum. The full vocabulary (keep the UI's EVENT_STYLES map in sync):
@@ -60,6 +123,8 @@ class _EventBus:
         log = self._log.setdefault(run_id, [])
         if len(log) < _MAX_LOG:
             log.append(event)
+        # M10: best-effort OTel mirror (no-op unless opted in + package present).
+        _otel_emit(run_id, event)
         for q in list(self._queues.get(run_id, [])):
             try:
                 q.put_nowait(event)
