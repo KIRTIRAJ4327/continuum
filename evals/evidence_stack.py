@@ -67,6 +67,31 @@ def _gate_detail(gate: Optional[Any], ok_text: str) -> str:
     return (msg or "failed")[:300]
 
 
+def _combine_status(gates: List[Optional[Any]]) -> str:
+    """Combine several gates (P1.1): any red → fail; all present green → pass; else pending."""
+    present = [g for g in gates if g is not None]
+    if not present:
+        return "pending"
+    statuses = [_gate_status(g) for g in present]
+    if "fail" in statuses:
+        return "fail"
+    if all(s == "pass" for s in statuses):
+        return "pass"
+    return "pending"
+
+
+def _combine_detail(named_gates: List[tuple], ok_text: str) -> str:
+    """Human detail for a combined layer — names the failing sub-gate(s)."""
+    failed = [name for name, g in named_gates
+              if g is not None and getattr(g, "status", None) == "red"]
+    if failed:
+        return "failed: " + ", ".join(failed)
+    present = [name for name, g in named_gates if g is not None]
+    if not present:
+        return "not yet run"
+    return ok_text
+
+
 def _scope_status(state: Any) -> str:
     """Layer-4 status driven by M7 state.mapping_fidelity."""
     bm = getattr(state, "business_mappings", []) or []
@@ -119,6 +144,27 @@ def build_evidence_stack(
     contract = _gate(state, "contract_validate")
     sast = _gate(state, "security_sast")
 
+    # P1.1: layers 1 & 2 read INDEPENDENT gates (lint+typecheck vs test) when the
+    # split gates are present, so "6 independent signals" is literally true
+    # (resolves OQ-3). When only the composite `local_verify` exists (pre-P1.1
+    # states), both layers fall back to it — preserving the original shape.
+    lint = _gate(state, "lint")
+    typecheck = _gate(state, "typecheck")
+    test = _gate(state, "test")
+    have_split = lint is not None or typecheck is not None or test is not None
+
+    if have_split:
+        build_status = _combine_status([lint, typecheck])
+        build_detail = _combine_detail([("lint", lint), ("typecheck", typecheck)],
+                                       "lint + types clean")
+        regression_status = _gate_status(test)
+        regression_detail = _gate_detail(test, "test suite green")
+    else:
+        build_status = _gate_status(local_verify)
+        build_detail = _gate_detail(local_verify, "lint, types, and build clean")
+        regression_status = _gate_status(local_verify)
+        regression_detail = _gate_detail(local_verify, "test suite green")
+
     # Layer 6 — human review: combine the three approval flags.
     approvals = {
         "story": bool(getattr(state, "story_approved", False)),
@@ -137,15 +183,15 @@ def build_evidence_stack(
     layers = [
         {
             "layer": "Build / compile",
-            "sublabel": "ruff + mypy + py_compile",
-            "status": _gate_status(local_verify),
-            "detail": _gate_detail(local_verify, "lint, types, and build clean"),
+            "sublabel": "lint + typecheck (independent)",
+            "status": build_status,
+            "detail": build_detail,
         },
         {
             "layer": "Regression suite",
-            "sublabel": "pytest (end to end)",
-            "status": _gate_status(local_verify),
-            "detail": _gate_detail(local_verify, "test suite green"),
+            "sublabel": "pytest (independent ground truth)",
+            "status": regression_status,
+            "detail": regression_detail,
         },
         {
             "layer": "Acceptance-criteria check",

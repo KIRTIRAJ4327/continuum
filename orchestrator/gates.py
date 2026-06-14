@@ -72,67 +72,85 @@ def update_gate_status(state, name: str, passed: bool, output: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 1. local_verify — lint / type / test / build
+# 1. local_verify — three INDEPENDENT gates: lint / typecheck / test (P1.1)
 # --------------------------------------------------------------------------- #
-async def gate_local_verify(code_path: str) -> Tuple[bool, str]:
-    """
-    Run local verification — stop at the first failure.
+# Gate independence (resolves OQ-3): build/compile, types, and the regression
+# suite are three separate signals — each its own pass/fail + evidence record —
+# rather than one combined `local_verify` gate. `gate_local_verify_split()` runs
+# each once; `gate_local_verify()` aggregates them for backward-compatible
+# standalone callers and the live retry loop. On a thin environment each gate
+# degrades to `py_compile` so the offline path still works.
 
-    Order:
-      1. ruff check
-      2. mypy --ignore-missing-imports
-      3. pytest tests/ -v --tb=short
-      4. python -m py_compile <code_path>  (build sanity)
 
-    Missing tools are treated as "skipped" (not a failure) so the gate still
-    works on a thin dev environment. A clearly broken Python file still fails
-    the build sub-step.
-
-    Returns:
-        (passed, combined_output)
-    """
-    parts: List[str] = []
+async def gate_lint(code_path: str) -> Tuple[bool, str]:
+    """Lint gate — `ruff` when present, else a `py_compile` syntax check."""
     path = code_path or "."
-
-    # 1. ruff
     if _have("ruff"):
         rc, out = _run(["ruff", "check", path])
-        parts.append(f"[ruff] rc={rc}\n{out}")
-        if rc != 0:
-            return False, "\n".join(parts)
-    else:
-        parts.append("[ruff] skipped (not installed)")
+        return rc == 0, f"[ruff] rc={rc}\n{out}"
+    return _pycompile(path, "lint")
 
-    # 2. mypy
+
+async def gate_typecheck(code_path: str) -> Tuple[bool, str]:
+    """Type/build gate — `mypy` when present, else a `py_compile` build check."""
+    path = code_path or "."
     if _have("mypy"):
         rc, out = _run(["mypy", path, "--ignore-missing-imports"])
-        parts.append(f"[mypy] rc={rc}\n{out}")
-        if rc != 0:
-            return False, "\n".join(parts)
-    else:
-        parts.append("[mypy] skipped (not installed)")
+        return rc == 0, f"[mypy] rc={rc}\n{out}"
+    return _pycompile(path, "typecheck")
 
-    # 3. pytest
+
+async def gate_test(code_path: str) -> Tuple[bool, str]:
+    """
+    Regression gate — `pytest` when present (rc==5 'no tests' is not a failure),
+    else compile any discovered test files, else skip-pass when there are none.
+    """
+    path = code_path or "."
     if _have("pytest"):
         rc, out = _run(["pytest", "tests/", "-v", "--tb=short"], timeout=300)
-        parts.append(f"[pytest] rc={rc}\n{out}")
-        # rc==5 means "no tests collected" — treat as non-failure for M0
-        if rc not in (0, 5):
-            return False, "\n".join(parts)
-    else:
-        parts.append("[pytest] skipped (not installed)")
+        return rc in (0, 5), f"[pytest] rc={rc}\n{out}"
+    # Offline fallback: compile test files if any exist; otherwise skip-pass.
+    targets = [t for t in _python_targets(path) if "test" in Path(t).name.lower()]
+    if not targets:
+        return True, "[pytest] skipped (not installed; no test files found)"
+    rc, out = _run([sys.executable, "-m", "py_compile", *targets])
+    return rc == 0, f"[pytest→py_compile] rc={rc} files={len(targets)}\n{out}"
 
-    # 4. build (py_compile)
+
+async def gate_local_verify_split(code_path: str) -> Dict[str, Tuple[bool, str]]:
+    """
+    Run the three independent gates once each and return per-gate results:
+        {"lint": (ok, out), "typecheck": (ok, out), "test": (ok, out)}
+    This is the single source of truth for local verification (P1.1).
+    """
+    return {
+        "lint": await gate_lint(code_path),
+        "typecheck": await gate_typecheck(code_path),
+        "test": await gate_test(code_path),
+    }
+
+
+async def gate_local_verify(code_path: str) -> Tuple[bool, str]:
+    """
+    Backward-compatible composite of the three independent gates: green iff all
+    three pass. Kept for standalone callers and the live retry loop, which key on
+    the `local_verify` GateStatus.
+    """
+    split = await gate_local_verify_split(code_path)
+    passed = all(ok for ok, _ in split.values())
+    out = "\n".join(
+        f"[{name}] {'PASS' if ok else 'FAIL'}\n{detail}" for name, (ok, detail) in split.items()
+    )
+    return passed, out
+
+
+def _pycompile(path: str, label: str) -> Tuple[bool, str]:
+    """Compile the python targets under `path`; the offline fallback for a gate."""
     targets = _python_targets(path)
-    if targets:
-        rc, out = _run([sys.executable, "-m", "py_compile", *targets])
-        parts.append(f"[py_compile] rc={rc} files={len(targets)}\n{out}")
-        if rc != 0:
-            return False, "\n".join(parts)
-    else:
-        parts.append("[py_compile] no python targets")
-
-    return True, "\n".join(parts)
+    if not targets:
+        return True, f"[{label}→py_compile] no python targets"
+    rc, out = _run([sys.executable, "-m", "py_compile", *targets])
+    return rc == 0, f"[{label}→py_compile] rc={rc} files={len(targets)}\n{out}"
 
 
 def _python_targets(path: str) -> List[str]:

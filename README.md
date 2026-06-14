@@ -39,8 +39,9 @@
 [![Spec Registry Tests](https://img.shields.io/badge/SpecRegistry_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Compliance Tests](https://img.shields.io/badge/Compliance_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![State Machine Tests](https://img.shields.io/badge/StateMachine_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_Shipped-7C3AED?style=flat-square)]()
-[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
+[![Gate Independence Tests](https://img.shields.io/badge/GateIndependence_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_+_P1.1-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -577,6 +578,31 @@ Proven offline in `scripts/verify_m13_state_machine.py` → 6/6 PASS.
 
 ---
 
+## ✅ Gate Independence (P1.1)
+
+The combined `local_verify` gate is split into **three independent gates** — so the
+Evidence Stack's "6 independent signals" is literally true (resolves **OQ-3**) and
+the M12 compliance claims are defensible.
+
+```
+gate_lint        ruff      → py_compile (offline)   layer 1: Build / compile
+gate_typecheck   mypy      → py_compile (offline)   layer 1: + types
+gate_test        pytest    → py_compile (offline)   layer 2: Regression  (independent)
+
+gate_local_verify_split()  runs each once (single source of truth)
+gate_local_verify()        = AND of the three (backward-compatible composite)
+```
+
+- **Independent evidence** — the developer path records `lint` / `typecheck` / `test`
+  as their own `GateStatus`, plus the composite `local_verify` the retry loop keys on.
+- **Evidence Stack** — layer 1 (build) reads lint+typecheck, layer 2 (regression)
+  reads test; pre-P1.1 states fall back to `local_verify` (byte-unchanged).
+- **Offline-safe** — each gate degrades to `py_compile` on a thin environment.
+
+Proven offline in `scripts/verify_p1_gate_independence.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -657,23 +683,24 @@ Five gaps between "architecturally sound POC" and "system a bank can run". The
 | Phase | Items | When | Rough estimate |
 |---|---|---|---|
 | **P0** — before real customer data | **P0.1** durable execution (wire `ContinuumGraph` + Postgres checkpointer as the live path, retire in-memory `_RUNS`) · **P0.2** sandbox hardening (real ACA sessions, no local-exec fallback) · **P0.3** auth + tenant isolation (identity, RBAC, per-tenant Neo4j subgraph — "M-Auth") | next | 6–8 sessions |
-| **P1** — before regulated / financial-services | **P1.1** gate independence (split `gate_local_verify` → `gate_lint`/`gate_typecheck`/`gate_test`; resolves OQ-3) · **P1.2** OTel → App Insights / Langfuse (real traces, real cost, per-stage latency, stuck-run alerts) · **P1.3** M12 Compliance Report (claims now true) · **P1.4** D29 Canada-residency resolution | after P0 | 5–7 sessions |
+| **P1** — before regulated / financial-services | **P1.1** ✅ gate independence (`gate_lint`/`gate_typecheck`/`gate_test`; resolves OQ-3) · **P1.2** OTel → App Insights / Langfuse (real traces, real cost, per-stage latency, stuck-run alerts) · **P1.3** ✅ M12 Compliance Report (claims now true) · **P1.4** D29 Canada-residency resolution | after P0 | 5–7 sessions |
 | **P2** — before scale | **P2.1** M11 Spec Registry · **P2.2** M13 State Machine · **P2.3** Hyperlight graduation (M14, when GA) · **P2.4** concurrency hardening (queue worker, not in-memory dict) | after P1 | 8–10 sessions |
 
 **Track overlap:** the feature milestones land inside the production phases —
 P1.3 = M12, P2.1 = M11, P2.2 = M13, P2.3 = M14.
 
 **Honesty notes carried into the roadmap:**
-- The PRD's "9 stages" pipeline (§4.2) is aspirational vs. the live
-  `_execute_pipeline()` path — **M13 is the reconciliation**, so the formal state
-  machine does not exist yet.
-- **OQ-3:** Evidence Stack layers 1+2 are the *same* `gate_local_verify` gate today
-  — "6 independent signals" becomes literally true only after **P1.1** splits it.
+- **M13 (shipped)** reconciles the PRD's aspirational "9 stages" (§4.2) into the
+  explicit 15-state machine + policy engine — but it governs as a *verified module*;
+  wiring it as the live *gating* path (replacing `_route()`) lands with **P0.1**.
+- **OQ-3 resolved (P1.1):** the Evidence Stack's layers 1 & 2 now read independent
+  gates (lint+typecheck vs test), so "6 independent signals" is literally true.
 - **M14 / Hyperlight** require `agent_framework` + a real sandbox and are **not
   offline-verifiable** — they will never carry a passing-badge claim in the
   zero-credential suite.
 - **P0.3 (auth/tenancy) is the gate for any real-client use** — nothing else
-  matters if one tenant's run can contaminate another's data.
+  matters if one tenant's run can contaminate another's data. **This is the
+  highest-priority remaining work.**
 
 ---
 
@@ -755,6 +782,7 @@ make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 make verify-m11       # spec registry (versioned store · supersession · conformance)
 make verify-m12       # compliance report (8-section audit artifact · JSON + HTML)
 make verify-m13       # 15-state machine (policy engine · G1–G4 gates · return edges)
+make verify-p1        # gate independence (lint/typecheck/test · resolves OQ-3)
 ```
 
 | Script | Checks | Result |
@@ -772,8 +800,9 @@ make verify-m13       # 15-state machine (policy engine · G1–G4 gates · retu
 | `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 ✅ |
 | `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid 8-section report | 3/3 ✅ |
 | `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · missing-artifact block · G1–G4 gates · return edges | 6/6 ✅ |
+| `scripts/verify_p1_gate_independence.py` | independent lint/typecheck/test gates · Evidence Stack layers 1+2 independent (OQ-3) · backward compat | 6/6 ✅ |
 
-> All 13 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 14 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
 **Planned (M14) — not yet implemented:**
 

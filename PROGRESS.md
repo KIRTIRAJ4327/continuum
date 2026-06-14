@@ -16,6 +16,52 @@ Entry format:
 
 ---
 
+## 2026-06-14 — P1.1: Gate Independence (resolves OQ-3) (P1.1)
+**Branch:** `feature/p1-gate-independence` (stacked on `feature/m13-state-machine`)  ·  **Commit:** pending
+
+**What:** Implemented P1.1 from the production-readiness track — splitting the
+combined `local_verify` gate into three INDEPENDENT gates (`gate_lint`,
+`gate_typecheck`, `gate_test`), each with its own pass/fail and its own evidence
+record. This makes the Evidence Stack's "6 independent signals" literally true
+(**resolves OQ-3**) and makes M12's compliance claims defensible. Single-run design:
+`gate_local_verify_split()` runs each gate once and is the source of truth; the
+DEVELOPER path records all three `GateStatus`es plus a derived composite
+`local_verify` (so the live retry loop, graph routing, and M13 quality gate — all of
+which key on `local_verify` — are unchanged). The Evidence Stack now reads layer 1
+(build = lint+typecheck) and layer 2 (regression = test) from *different* signals
+when the split gates exist, falling back to `local_verify` for pre-P1.1 states
+(byte-unchanged). Each gate keeps its `py_compile` offline fallback. Per-gate retry
+*budgets* in the live loop remain a follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/gates.py` — new `gate_lint` / `gate_typecheck` / `gate_test` /
+  `gate_local_verify_split`; `gate_local_verify` refactored to the composite
+  aggregate; `_pycompile` helper. `_python_targets` unchanged.
+- `orchestrator/agent_runner.py` — DEVELOPER branch runs the split once, records the
+  three sub-gates + the composite (single tool run, no double-execution).
+- `evals/evidence_stack.py` — layers 1 & 2 read independent gates when present
+  (`_combine_status` / `_combine_detail`), else fall back to `local_verify`; sublabels
+  updated; 6-layer shape and keys unchanged.
+- `scripts/verify_m0_loop.py` — patches `gate_local_verify_split` (the new source of
+  truth) instead of the composite; same retry/escalation behaviour, still 3/3.
+- `scripts/verify_p1_gate_independence.py` (new, 6/6) + `Makefile` `verify-p1`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Gate-system section
+  rewrite, P1.1 invariant, OQ-3 marked resolved, badges, verification matrix,
+  production-readiness P1.1 → shipped.
+
+**Verification:** all suites green, zero credentials:
+- M0–M13 suites all pass (notably `verify_m0_loop` 3/3 after the patch-target change,
+  `verify_m6_workqueue` 6/6, `verify_m10_assert` 6/6 — Evidence Stack shape intact)
+- `verify_p1_gate_independence.py` → **6/6** · `evals/ci_gate.py` → exit 0 · `import api.main` OK.
+
+**Notes / follow-ups:** This is the offline-verifiable slice of P1. The remaining P0
+work (durable execution, sandbox, auth/tenancy) and P1.2 observability touch the live
+path / external services and are not offline-verifiable. Recommended next: **P0.3
+auth/tenancy** (the gate for real-client use) or **P0.1 durable execution** (which is
+also where the M13 policy engine becomes the live gating mechanism).
+
+---
+
 ## 2026-06-14 — M13: 15-State SDLC Machine + Policy Engine (M13)
 **Branch:** `feature/m13-state-machine` (stacked on `feature/m12-compliance`)  ·  **Commit:** pending
 

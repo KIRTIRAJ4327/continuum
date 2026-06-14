@@ -24,6 +24,7 @@ python scripts/verify_m10_assert.py     # must print 6/6
 python scripts/verify_m11_spec_registry.py # must print 4/4
 python scripts/verify_m12_compliance.py     # must print 3/3
 python scripts/verify_m13_state_machine.py  # must print 6/6
+python scripts/verify_p1_gate_independence.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -57,6 +58,7 @@ make verify-m10       # 6/6 ASSERT / Rubric Eval Integration
 make verify-m11       # 4/4 Spec Registry
 make verify-m12       # 3/3 Compliance Report
 make verify-m13       # 6/6 15-State SDLC Machine
+make verify-p1        # 6/6 Gate Independence (lint/typecheck/test)
 
 # Tests, lint, types
 pytest -q
@@ -144,7 +146,17 @@ Skills live at `skills/<name>/v1.0/skill.py`, loaded via `importlib.util.spec_fr
 
 ### Gate system (`orchestrator/gates.py`)
 
-`gate_local_verify` runs ruff → mypy → pytest in order, falling back to `py_compile` per `.py` file when tools aren't installed. TypeScript files are excluded. A gate failure sets `gate.status = "red"` and populates `gate.error_message`.
+**P1.1 (gate independence):** local verification is three INDEPENDENT gates —
+`gate_lint` (ruff), `gate_typecheck` (mypy), `gate_test` (pytest) — each degrading
+to `py_compile` on a thin environment. `gate_local_verify_split()` runs each once
+and returns `{"lint","typecheck","test"}`; `gate_local_verify()` aggregates them
+(green iff all pass) as the backward-compatible composite the live retry loop keys
+on. The DEVELOPER path records all three as their own `GateStatus` **plus** the
+composite `local_verify`, so the Evidence Stack reads layer 1 (build = lint+typecheck)
+and layer 2 (regression = test) from *different* signals (resolves OQ-3); when only
+`local_verify` exists (pre-P1.1 states) both layers fall back to it. A gate failure
+sets `gate.status = "red"` and populates `gate.error_message`. TypeScript files are
+excluded. (Per-gate retry *budgets* in the live loop remain a follow-up tied to P0.1.)
 
 ### Episodic memory (`graph_db/driver.py`, M3)
 
@@ -292,10 +304,11 @@ the verify suite still holds throughout.
 - **P0.3 Auth + tenancy** ("M-Auth", ideally before M11) — identity on every run and
   gate approval, RBAC (dev/reviewer/admin), per-tenant Neo4j subgraph / audit trail /
   spec registry. This is the gate for any real-client use.
-- **P1.1 Gate independence** — split `gate_local_verify` into `gate_lint` /
-  `gate_typecheck` / `gate_test`, each with its own pass/fail + retry budget +
-  evidence record. Makes the Evidence Stack's "6 independent signals" literally true
-  (resolves OQ-3) and makes M12's compliance claims defensible.
+- **P1.1 Gate independence** — ✅ **shipped** (see the Gate system section above):
+  `gate_lint` / `gate_typecheck` / `gate_test` are separate gates with separate
+  evidence records; the Evidence Stack's layers 1 & 2 now read different signals
+  (resolves OQ-3) and M12's compliance claims are defensible. Per-gate retry
+  *budgets* in the live loop remain a follow-up tied to P0.1.
 - **P1.2 Observability** — OTel (M10 hook) exported to App Insights / Langfuse: real
   traces, real cost (not the offline `$0.02` stub), per-stage latency, stuck-run alerts.
 
@@ -353,4 +366,5 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **Spec Registry is append-only + offline-safe (M11)** — `graph_db/spec_registry.py` never edits a spec in place; a materially different spec creates a new version that SUPERSEDES the prior. The module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with no Neo4j; the live Neo4j path runs only when a *connected* driver is passed (`_is_live()`) and any error falls back to the store. The M11 scope-guard branch only fires when `state.registry_current_before` is set, so M0–M10 runs are byte-unchanged. `specs_match()` is the single conformance predicate shared by the write skill and the gate.
 - **Compliance Report is total + honest (M12)** — `build_compliance_report()` always returns all 8 sections; absent data is an explicit `null`/`[]` with a `_missing_reason` and is listed in `missing` (never silently dropped). It is pure/offline (event-bus audit trail, lazy `config`/`git`), reuses `build_evidence_stack`, and never asserts more than the run actually proved — a blocked/returned run yields a valid report whose `compliance_assertions.passed` is honestly `False`.
 - **State machine governs, offline-safe (M13)** — `policy_engine.can_transition()` is a pure predicate over the artifact and the declared `state_machine.py` graph (edge → gate → artifacts → quality gates); `state_machine.py` imports nothing from the orchestrator so `state.py` can import `SDLCState` cycle-free. The live `_execute_pipeline()` path is unchanged — `lifecycle_state` is surfaced read-only via `derive_lifecycle_state()` (best-effort, never raises). M0–M12 runs are byte-unchanged.
+- **Gates are independent (P1.1)** — `gate_lint`/`gate_typecheck`/`gate_test` are separate gates with separate `GateStatus` records; `gate_local_verify` is the backward-compatible aggregate the live retry loop and the M0 verifier key on (M0 patches `gate_local_verify_split`, the single-run source of truth). The Evidence Stack reads layers 1 & 2 from different signals when the split gates exist, else falls back to `local_verify` — so pre-P1.1 states are byte-unchanged. Each gate keeps its `py_compile` offline fallback.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
