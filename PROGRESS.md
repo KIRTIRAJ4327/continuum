@@ -16,6 +16,51 @@ Entry format:
 
 ---
 
+## 2026-06-14 — M12: Compliance Report (M12)
+**Branch:** `feature/m12-compliance` (stacked on `feature/m11-spec-registry`)  ·  **Commit:** pending
+
+**What:** Implemented M12 from `Continuum-PRD-v3.0.md` §8 — the second Spine
+milestone, and **packaging, not new capability**. `api/compliance.py`
+`build_compliance_report(run_id, state, events=None)` assembles an auditor-readable
+artifact from data that already exists across the run state and event bus: 8
+always-present sections (run metadata, spec, business mappings, gate decisions,
+the 6-layer Evidence Stack, audit trail, harness/model versions, and a boolean
+compliance-assertions checklist). The `spec` section prefers the M11 Registry and
+falls back to work-item state. Honesty is built in: a blocked/returned run yields a
+*valid* report whose `compliance_assertions.passed` is truthfully `False`, and any
+absent data is an explicit `null`/`[]` carrying a `_missing_reason`, enumerated in
+`report["missing"]` — never silently omitted (`complete == missing == []`). Two
+endpoints: `GET /runs/{run_id}/compliance-report` (JSON) and `…/compliance-report.html`
+(`render_compliance_html`). Pure/offline: audit trail from the in-memory event bus,
+`git describe` + `config` are best-effort lazy lookups; reuses `build_evidence_stack`.
+
+**Files:**
+- `api/compliance.py` (new) — `build_compliance_report`, `render_compliance_html`,
+  `SECTION_ORDER`, the eight `_section_*` builders, `_collect_missing`, and
+  best-effort `_harness_version` / `_model_config` helpers.
+- `api/main.py` — `GET /runs/{run_id}/compliance-report` (+ `.html`); import +
+  `HTMLResponse`.
+- `scripts/verify_m12_compliance.py` (new, 3/3) + `Makefile` `verify-m12` target.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Compliance Report
+  architecture section, M12 invariant, badges, timeline, verification matrix
+  (M12 moved roadmap → shipped).
+
+**Verification:** all suites green, zero credentials:
+- `verify_agent_core.py` (11/11) · `verify_m0_loop.py` (3/3) · `verify_m3_learning.py` (6/6)
+- `verify_m5_evolution.py` · `verify_m6_workqueue.py` · `verify_m7_scope_guard.py` (2/2)
+- `verify_m8_repo_split.py` (3/3) · `verify_m9_maf_pilot.py` (6/6) · `verify_m10_assert.py` (6/6)
+- `verify_m11_spec_registry.py` (4/4) · `verify_m12_compliance.py` → **3/3**
+- `evals/ci_gate.py` → exit 0 (no regression) · `import api.main` OK.
+
+**Notes / follow-ups:** Approver identity + approval timestamps are explicit nulls
+with a reason (`pending auth, P0.3`) — they become real once auth lands. The audit
+trail reads the in-memory event bus; the durable-Postgres source is a P-track
+concern. Branch is stacked on M11 (PR #16) — merge M11 first, then this PR shows a
+clean M12-only diff. Next: **M13 15-State Machine** (Frontier, gated on M11+M12,
+now both shipped) or the **P0** production track.
+
+---
+
 ## 2026-06-14 — M11: Spec Registry (M11)
 **Branch:** `feature/m11-spec-registry`  ·  **Commit:** pending
 

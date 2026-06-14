@@ -37,8 +37,9 @@
 [![MAF Pilot Tests](https://img.shields.io/badge/MAF_Pilot_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![ASSERT Eval Tests](https://img.shields.io/badge/ASSERT_Eval_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Spec Registry Tests](https://img.shields.io/badge/SpecRegistry_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M11_Shipped-7C3AED?style=flat-square)]()
-[![Roadmap](https://img.shields.io/badge/Roadmap-M12--M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
+[![Compliance Tests](https://img.shields.io/badge/Compliance_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M12_Shipped-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M13--M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -517,6 +518,34 @@ Proven offline in `scripts/verify_m11_spec_registry.py` → 4/4 PASS.
 
 ---
 
+## ✅ Compliance Report (M12)
+
+For a regulated customer, "the pipeline ran and tests passed" is not evidence — a
+structured, auditor-readable artifact is. `GET /runs/{run_id}/compliance-report`
+packages a completed run into **8 always-present sections**:
+
+```
+api/compliance.py  build_compliance_report(run_id, state) -> dict   # pure, offline
+  1 run_metadata          intent · component · lead time · cost · status
+  2 spec                  Gate-1 spec (M11 Registry, else work-item state)
+  3 business_mappings     D11 mappings + scope-guard conformance
+  4 gate_decisions        human G1/G2 + every automated gate
+  5 evidence_stack        the 6-layer Evidence Stack (reused)
+  6 audit_trail           chronological event log
+  7 versions              harness (git describe) + model mode/tiers
+  8 compliance_assertions boolean checklist + overall passed
+```
+
+- **Honest, not optimistic** — a blocked/returned run still yields a *valid* report;
+  its `compliance_assertions.passed` is truthfully `False`.
+- **Nothing silently omitted** — absent data is an explicit `null`/`[]` with a
+  `_missing_reason`, enumerated in `report["missing"]` (`complete == missing == []`).
+- **JSON + HTML** — `…/compliance-report` and `…/compliance-report.html`.
+
+Proven offline in `scripts/verify_m12_compliance.py` → 3/3 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -554,10 +583,10 @@ M10 ─── ASSERT / Rubric Eval Integration · specs for Rules 1–9 + M7 sco
   │     ✅  declarative machine-checkable rubrics · opt-in OTel export · 6/6 PASS
   │
 M11 ─── Spec Registry · persistent versioned spec store · supersession chain
-  ┊     ✅  GET /specs/{component} · scope-guard extends to Registry · 4/4 PASS
-  ┊
-M12 ┄┄┄ Compliance Report · structured audit artifact (EU AI Act / OSFI)
-  ┊     🔜 planned (Spine) · packages spec + gates + evidence + audit trail
+  │     ✅  GET /specs/{component} · scope-guard extends to Registry · 4/4 PASS
+  │
+M12 ─── Compliance Report · structured audit artifact (EU AI Act / OSFI)
+  ┊     ✅  8 sections · reuses Evidence Stack · JSON + HTML · 3/3 PASS
   ┊
 M13 ┄┄┄ 15-State SDLC Machine · policy engine · G1–G4 named gates
   ┊     🔜 planned (Frontier) · gated on M11+M12
@@ -585,7 +614,7 @@ and auth/tenancy are prerequisites, with the feature milestones interleaved afte
 | Milestone | What it adds | Key new files | Gate-on |
 |---|---|---|---|
 | **M11** Spec Registry *(Spine)* ✅ **shipped** | Persistent, versioned spec store; BSA conforms-to-or-supersedes the current spec per component | `graph_db/spec_registry.py`, `skills/{query,write}_spec_registry`, `GET /specs/{component}` | M7 scope-guard |
-| **M12** Compliance Report *(Spine)* | `GET /runs/{id}/compliance-report` packaging spec + gate decisions + evidence + audit trail (EU AI Act / OSFI) | `api/compliance.py`, `ComplianceReport.tsx` | M11 |
+| **M12** Compliance Report *(Spine)* ✅ **shipped** | `GET /runs/{id}/compliance-report` (JSON + HTML) packaging spec + gate decisions + evidence + audit trail (EU AI Act / OSFI) | `api/compliance.py` | M11 |
 | **M13** 15-State Machine *(Frontier)* | First-class `SDLCStateMachine` + `policy_engine.can_transition()`; G1–G4 named gates; `lifecycle_state` on the artifact | `orchestrator/state_machine.py`, `orchestrator/policy_engine.py` | M11+M12 |
 | **M14** MAF Graduation *(Frontier)* | All agents on MAF harness primitives; Hyperlight CodeAct sandbox; Agent Optimizer feeding `human_promote()` | — (graduates M9 pilot) | M13 · **not offline-verifiable** |
 
@@ -693,6 +722,7 @@ make verify-m8        # two-layer repo split / .pdlc/ artifacts
 make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 make verify-m11       # spec registry (versioned store · supersession · conformance)
+make verify-m12       # compliance report (8-section audit artifact · JSON + HTML)
 ```
 
 | Script | Checks | Result |
@@ -708,19 +738,19 @@ make verify-m11       # spec registry (versioned store · supersession · confor
 | `scripts/verify_m9_maf_pilot.py` | capability gate · opt-in · fallback routing | 6/6 ✅ |
 | `scripts/verify_m10_assert.py` | rule coverage · spec discrimination · 3-valued scope · OTel no-op | 6/6 ✅ |
 | `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 ✅ |
+| `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid 8-section report | 3/3 ✅ |
 
-> All 11 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 12 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
-**Planned (M12–M14) — not yet implemented:**
+**Planned (M13–M14) — not yet implemented:**
 
 | Script (planned) | Intended checks | Target |
 |--------|--------|--------|
-| `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid report | 3/3 |
 | `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · G1–G4 gates | 6/6 |
 | M14 MAF graduation | latency + token cost vs. M9 baseline (**not offline-verifiable**) | measured |
 
 > These are roadmap targets, **not passing checks** — the scripts do not exist yet.
-> Today's offline suite is the 11 rows above.
+> Today's offline suite is the 12 rows above.
 
 ---
 
