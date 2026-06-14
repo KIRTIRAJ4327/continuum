@@ -157,6 +157,8 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "business_mappings": getattr(state, "business_mappings", []) or [],
         "mapping_fidelity": getattr(state, "mapping_fidelity", None),
         "pdlc_path": getattr(state, "pdlc_path", None),
+        "component": getattr(state, "component", None),
+        "spec_superseded": getattr(state, "spec_superseded", None),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -303,10 +305,12 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             })
         logger.warning("local_verify red, retry %d/%d", gate.retry_count, _MAX_RETRIES)
 
-    # 2.5: M7 Scope-Guard gate — only when business_mappings were supplied and
-    # the developer chain succeeded (local_verify green or absent).
+    # 2.5: M7 Scope-Guard gate — runs when business_mappings were supplied OR a
+    # prior Registry spec exists for this component (M11 conformance), and the
+    # developer chain succeeded (local_verify green or absent).
     bm = getattr(state, "business_mappings", []) or []
-    if bm:
+    has_prior = getattr(state, "registry_current_before", None) is not None
+    if bm or has_prior:
         lv_check = _gate(state, "local_verify")
         if lv_check is None or lv_check.status == "green":
             sc_passed, sc_output = await gate_scope_conformance(state)
@@ -486,7 +490,12 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
     artifacts: Dict[str, Any] = {}
     role = agent.lower()
     if role == AgentRole.BSA.value:
-        artifacts = {"story": state.story}
+        artifacts = {
+            "story": state.story,
+            "component": state.component,
+            "registry_specs": state.registry_specs,
+            "spec_superseded": state.spec_superseded,
+        }
     elif role == AgentRole.ARCHITECT.value:
         artifacts = {
             "contract": state.contract,
@@ -512,6 +521,29 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"unknown agent '{agent}'")
 
     return {"run_id": run_id, "agent": agent, "artifacts": artifacts}
+
+
+@app.get("/specs")
+async def list_specs() -> Dict[str, Any]:
+    """M11: list components in the Spec Registry with their current version."""
+    from graph_db import spec_registry
+    return {"components": spec_registry.list_components()}
+
+
+@app.get("/specs/{component}")
+async def get_spec_chain(component: str) -> Dict[str, Any]:
+    """M11: return the version chain (history + current) for a component."""
+    from graph_db import spec_registry
+    history = await spec_registry.get_spec_history(component)
+    current = await spec_registry.get_current_spec(component)
+    if not history and current is None:
+        raise HTTPException(status_code=404, detail=f"no specs for component '{component}'")
+    return {
+        "component": component,
+        "current": current,
+        "history": history,
+        "versions": len(history),
+    }
 
 
 @app.post("/run/{run_id}/resume")

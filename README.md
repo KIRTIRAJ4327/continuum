@@ -36,8 +36,9 @@
 [![Repo Split Tests](https://img.shields.io/badge/RepoSplit_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![MAF Pilot Tests](https://img.shields.io/badge/MAF_Pilot_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![ASSERT Eval Tests](https://img.shields.io/badge/ASSERT_Eval_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M10_Shipped-7C3AED?style=flat-square)]()
-[![Roadmap](https://img.shields.io/badge/Roadmap-M11--M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
+[![Spec Registry Tests](https://img.shields.io/badge/SpecRegistry_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M11_Shipped-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M12--M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -488,6 +489,34 @@ Proven offline in `scripts/verify_m10_assert.py` → 6/6 PASS.
 
 ---
 
+## ✅ Spec Registry (M11)
+
+A spec no longer dies with its run. The **Spec Registry** is a persistent,
+versioned, append-only store of the agreed spec per **component** — so run N+1
+grounds on run N's decisions and architectural drift becomes detectable.
+
+```
+orchestrator/component.py    component_slug(request, story)  # deterministic key
+graph_db/spec_registry.py    write_spec · get_current_spec · get_spec_history ·
+                             mark_superseded · specs_match    # pure, offline
+  three-tier fallback:  live Neo4j  →  module _IN_MEMORY_SPECS  →  Python lookups
+```
+
+- **BSA grounds + persists** — `query_spec_registry` retrieves the prior current
+  spec *before* drafting; `write_spec_registry` files this run's spec as a new
+  version, recording a `SUPERSEDES` link when it materially differs.
+- **Append-only versioning** — no in-place edits; a different spec creates a new
+  version that supersedes the old (which flips to `status=superseded` + reason).
+- **Scope-guard extends to the Registry** — `gate_scope_conformance` now reds a run
+  whose spec drifts from the Registry's current spec *without* a recorded
+  supersession. The check only fires when a prior spec exists, so M0–M10 is unchanged.
+- **`GET /specs`** lists components; **`GET /specs/{component}`** returns the version
+  chain.
+
+Proven offline in `scripts/verify_m11_spec_registry.py` → 4/4 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -523,9 +552,9 @@ M9 ──── MAF Harness Pilot · Backend agent on Microsoft Agent Framework
   │
 M10 ─── ASSERT / Rubric Eval Integration · specs for Rules 1–9 + M7 scope
   │     ✅  declarative machine-checkable rubrics · opt-in OTel export · 6/6 PASS
-  ┊
-M11 ┄┄┄ Spec Registry · persistent versioned spec store · supersession chain
-  ┊     🔜 planned (Spine) · GET /specs/{component} · scope-guard extends to Registry
+  │
+M11 ─── Spec Registry · persistent versioned spec store · supersession chain
+  ┊     ✅  GET /specs/{component} · scope-guard extends to Registry · 4/4 PASS
   ┊
 M12 ┄┄┄ Compliance Report · structured audit artifact (EU AI Act / OSFI)
   ┊     🔜 planned (Spine) · packages spec + gates + evidence + audit trail
@@ -555,7 +584,7 @@ and auth/tenancy are prerequisites, with the feature milestones interleaved afte
 
 | Milestone | What it adds | Key new files | Gate-on |
 |---|---|---|---|
-| **M11** Spec Registry *(Spine)* | Persistent, versioned Neo4j spec store; BSA conforms-to-or-supersedes the current spec per component | `graph_db/spec_registry.py`, `skills/{query,write}_spec_registry`, `GET /specs/{component}` | M7 scope-guard |
+| **M11** Spec Registry *(Spine)* ✅ **shipped** | Persistent, versioned spec store; BSA conforms-to-or-supersedes the current spec per component | `graph_db/spec_registry.py`, `skills/{query,write}_spec_registry`, `GET /specs/{component}` | M7 scope-guard |
 | **M12** Compliance Report *(Spine)* | `GET /runs/{id}/compliance-report` packaging spec + gate decisions + evidence + audit trail (EU AI Act / OSFI) | `api/compliance.py`, `ComplianceReport.tsx` | M11 |
 | **M13** 15-State Machine *(Frontier)* | First-class `SDLCStateMachine` + `policy_engine.can_transition()`; G1–G4 named gates; `lifecycle_state` on the artifact | `orchestrator/state_machine.py`, `orchestrator/policy_engine.py` | M11+M12 |
 | **M14** MAF Graduation *(Frontier)* | All agents on MAF harness primitives; Hyperlight CodeAct sandbox; Agent Optimizer feeding `human_promote()` | — (graduates M9 pilot) | M13 · **not offline-verifiable** |
@@ -663,6 +692,7 @@ make verify-m7        # mapping fidelity / scope-guard
 make verify-m8        # two-layer repo split / .pdlc/ artifacts
 make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
+make verify-m11       # spec registry (versioned store · supersession · conformance)
 ```
 
 | Script | Checks | Result |
@@ -677,20 +707,20 @@ make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 | `scripts/verify_m8_repo_split.py` | layer-2 placeholder · pdlc write · evidence.json | 3/3 ✅ |
 | `scripts/verify_m9_maf_pilot.py` | capability gate · opt-in · fallback routing | 6/6 ✅ |
 | `scripts/verify_m10_assert.py` | rule coverage · spec discrimination · 3-valued scope · OTel no-op | 6/6 ✅ |
+| `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 ✅ |
 
-> All 10 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 11 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
-**Planned (M11–M14) — not yet implemented:**
+**Planned (M12–M14) — not yet implemented:**
 
 | Script (planned) | Intended checks | Target |
 |--------|--------|--------|
-| `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 |
 | `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid report | 3/3 |
 | `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · G1–G4 gates | 6/6 |
 | M14 MAF graduation | latency + token cost vs. M9 baseline (**not offline-verifiable**) | measured |
 
 > These are roadmap targets, **not passing checks** — the scripts do not exist yet.
-> Today's offline suite is the 10 rows above.
+> Today's offline suite is the 11 rows above.
 
 ---
 

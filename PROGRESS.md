@@ -16,6 +16,61 @@ Entry format:
 
 ---
 
+## 2026-06-14 — M11: Spec Registry (M11)
+**Branch:** `feature/m11-spec-registry`  ·  **Commit:** pending
+
+**What:** Implemented M11 from `Continuum-PRD-v3.0.md` §8 — the first Spine
+milestone. A spec no longer dies with its run: the **Spec Registry** is a
+persistent, versioned, append-only store of the agreed spec per *component*
+(a deterministic slug). On a run, the BSA retrieves the prior current spec for the
+component **before** drafting (`query_spec_registry`), then persists this run's spec
+as a new version (`write_spec_registry`), recording a `SUPERSEDES` link + reason when
+the body materially differs. The M7 scope-guard gained a Registry-conformance branch:
+a run whose spec drifts from the Registry's current spec **without** a recorded
+supersession is red (the branch only fires when a prior spec exists, so M0–M10 runs
+are byte-unchanged). New read-only endpoints expose the version chain. Fully
+offline-safe: a module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with
+no Neo4j; the live Neo4j path runs only when a *connected* driver is passed.
+
+**Files:**
+- `graph_db/spec_registry.py` (new) — `write_spec`, `get_current_spec`,
+  `get_spec_history`, `mark_superseded`, `list_components`, `specs_match` (shared
+  conformance predicate), `_is_live`, `_reset_registry`. Three-tier fallback mirrors
+  the M3 driver; live Cypher guarded so it never breaks offline.
+- `orchestrator/component.py` (new) — `component_slug(request, story)`, deterministic.
+- `skills/query_spec_registry/v1.0/skill.py` + `skills/write_spec_registry/v1.0/skill.py`
+  (new) — distinct from the existing `write_spec` formatter skill; offline-safe, never raise.
+- `orchestrator/agent_runner.py` — BSA offline path retrieves+persists the Registry
+  spec; `apply_agent_output` stores `component`, `registry_specs`,
+  `registry_current_before`, `spec_superseded`.
+- `orchestrator/state.py` — four M11 fields.
+- `orchestrator/gates.py` — `gate_scope_conformance` restructured: M7 mapping check +
+  M11 Registry-conformance check; M7 messages/behaviour preserved exactly.
+- `api/main.py` — `GET /specs`, `GET /specs/{component}`; BSA artifact view + state
+  serializer surface M11 fields; step-2.5 guard widened to fire on a prior spec.
+- `agents/bsa.yaml` — two new allowed_skills.
+- `scripts/verify_m11_spec_registry.py` (new) + `Makefile` `verify-m11` target.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Spec Registry
+  architecture section, M11 invariant, badges, timeline, verification matrix
+  (M11 moved from roadmap → shipped).
+
+**Verification:** all suites green, zero credentials:
+- `verify_agent_core.py` → ALL PASS (11/11) · `verify_m0_loop.py` → ALL PASS (3/3)
+- `verify_m3_learning.py` → 6/6 · `verify_m5_evolution.py` → OK · `verify_m6_workqueue.py` → OK
+- `verify_m7_scope_guard.py` → 2/2 · `verify_m8_repo_split.py` → 3/3
+- `verify_m9_maf_pilot.py` → 6/6 · `verify_m10_assert.py` → 6/6
+- `verify_m11_spec_registry.py` → **4/4** · `evals/ci_gate.py` → exit 0 (no regression)
+- End-to-end smoke: two BSA runs on the same request → run 2 grounded on run 1's v1,
+  filed v2; `list_components` shows current_version=2.
+
+**Notes / follow-ups:** Identical specs across runs still create a new (non-superseding)
+version — intentional per-run audit trail; supersession only fires on material diff.
+Live Neo4j reads from the API endpoints require a *connected* driver (offline uses the
+module store) — wiring a connected driver is a P-track concern. Next Spine milestone:
+**M12 Compliance Report**, which can reuse `build_evidence_stack` + the Registry spec.
+
+---
+
 ## 2026-06-14 — PRD v3.0 adoption + M11–M14 / P0–P2 roadmap docs (docs)
 **Branch:** `feature/prd-v3-roadmap-docs`  ·  **Commit:** pending
 

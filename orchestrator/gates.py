@@ -321,20 +321,39 @@ async def gate_scope_conformance(state: Any) -> Tuple[bool, str]:
     Never auto-retries on red — the run lands in `blocked` state (M6 Blocked panel).
     """
     mappings: List[Dict] = getattr(state, "business_mappings", []) or []
-    if not mappings:
-        return True, "no business_mappings supplied — scope guard skipped"
 
-    code: Dict[str, str] = getattr(state, "code", {}) or {}
-    result = _check_scope(mappings, code)
-    state.mapping_fidelity = result
+    # ── M7: mapping fidelity (only when business_mappings were supplied) ──────
+    if mappings:
+        code: Dict[str, str] = getattr(state, "code", {}) or {}
+        result = _check_scope(mappings, code)
+        state.mapping_fidelity = result
+        if not result["exact_match"]:
+            parts: List[str] = []
+            if result["missing_in_code"]:
+                parts.append("missing: " + ", ".join(result["missing_in_code"]))
+            if result["extra_in_code"]:
+                parts.append("extra: " + ", ".join(result["extra_in_code"]))
+            return False, "scope mismatch — " + "; ".join(parts)
 
-    if result["exact_match"]:
-        n = len(result["supplied"])
+    # ── M11: Registry conformance (only when a prior Registry spec exists) ────
+    # The run's spec must conform to the Registry's current spec for this
+    # component, OR have explicitly superseded it. Undeclared drift → red.
+    prior = getattr(state, "registry_current_before", None)
+    if prior is not None:
+        from graph_db.spec_registry import specs_match
+        new_spec = (getattr(state, "story", None) or {}).get("spec", {}) or {}
+        superseded = getattr(state, "spec_superseded", None)
+        component = getattr(state, "component", None) or "?"
+        if not specs_match(new_spec, prior.get("body", {})) and not superseded:
+            return False, (
+                f"spec drift: differs from Registry spec for {component} "
+                "without recorded supersession"
+            )
+
+    # ── success messages ─────────────────────────────────────────────────────
+    if mappings:
+        n = len(state.mapping_fidelity["supplied"])  # set above
         return True, f"scope ok: {n} mapping(s) confirmed in generated code"
-
-    parts: List[str] = []
-    if result["missing_in_code"]:
-        parts.append("missing: " + ", ".join(result["missing_in_code"]))
-    if result["extra_in_code"]:
-        parts.append("extra: " + ", ".join(result["extra_in_code"]))
-    return False, "scope mismatch — " + "; ".join(parts)
+    if prior is not None:
+        return True, f"spec conforms to Registry spec for {getattr(state, 'component', '?')}"
+    return True, "no business_mappings supplied — scope guard skipped"

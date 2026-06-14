@@ -21,6 +21,7 @@ python scripts/verify_m7_scope_guard.py # must print 2/2
 python scripts/verify_m8_repo_split.py  # must print 3/3
 python scripts/verify_m9_maf_pilot.py   # must print 6/6
 python scripts/verify_m10_assert.py     # must print 6/6
+python scripts/verify_m11_spec_registry.py # must print 4/4
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -51,6 +52,7 @@ make verify-m7        # 2/2 Mapping Fidelity / Scope-Guard
 make verify-m8        # 3/3 Two-Layer Repo Split
 make verify-m9        # 6/6 MAF Harness Pilot
 make verify-m10       # 6/6 ASSERT / Rubric Eval Integration
+make verify-m11       # 4/4 Spec Registry
 
 # Tests, lint, types
 pytest -q
@@ -187,22 +189,38 @@ Proposals that would regress any eval metric are auto-rejected by the evaluator 
 
 `generate_script(dag, max_agents=4, token_budget=50000)` produces a deterministic Python script that fans out to N parallel subagent slots when the Planner DAG has ≥ 5 tasks. The script is stored in `state.decomposition_script` for operator inspection; the linear DB→BE→FE chain still runs by default.
 
-## Roadmap (M11–M14) — not yet implemented
+### Spec Registry (`graph_db/spec_registry.py`, M11)
 
-The active spec is **`Continuum-PRD-v3.0.md`** (§8). These are **planned** — no code
-exists yet, so do **not** add their verify scripts to the non-negotiable list until
-they exist and pass. Guard-rails for the implementing session (one milestone per
-feature branch → PR to `dev`, per PRD §12):
+Persistent, versioned, append-only store of the agreed spec per **component** (a
+deterministic slug from `orchestrator/component.py` `component_slug(request, story)`).
+A `Spec` is one immutable version; a new version that materially differs SUPERSEDES
+the prior one (no in-place edits). Three-tier fallback mirrors the M3 driver:
+live Neo4j session → process-level `_IN_MEMORY_SPECS` list → pure-Python lookups.
+The store is **module-level** so run N's spec is visible to run N+1 and to the
+read-only API within one process — that's what gives cross-run persistence offline,
+with no driver singleton plumbing. The live path runs only when a *connected*
+`Neo4jDriver` is passed (`_is_live()`); any error falls back to the store.
 
-- **M11 Spec Registry** (Spine) — persistent, versioned Neo4j spec store. New
-  `graph_db/spec_registry.py` mirrors `Neo4jDriver`'s three-tier fallback (live →
-  `_in_memory_specs` list → pure-Python offline match — copy the `write_episode` /
-  `get_similar_episodes` shape). New skills `query_spec_registry` + `write_spec_registry`
-  (**distinct** from the existing `write_spec` skill, which only formats a spec into
-  state — do not rename it). `GET /specs/{component}` + `GET /specs`. Extend
-  `gate_scope_conformance` so a run conforms to **or explicitly supersedes** the
-  Registry spec for its component. Cross-run persistence in one API process needs a
-  process-level driver singleton (or skills that lazily fetch it). Target: `verify_m11_spec_registry.py` 4/4.
+BSA flow (`_run_offline`, role==bsa): `query_spec_registry` retrieves the prior
+current spec **before** drafting, then `write_spec_registry` persists this run's
+spec as a new version, recording a supersession via `specs_match()` when the body
+materially differs. Results land on `state.component`, `state.registry_specs`,
+`state.registry_current_before`, `state.spec_superseded`. `gate_scope_conformance`
+(M7) gained a Registry-conformance branch: when a prior spec exists, the run's spec
+must `specs_match()` it **or** carry a `spec_superseded` record — undeclared drift
+is red. `GET /specs` lists components; `GET /specs/{component}` returns the version
+chain. `specs_match()` (stable keys: `api_endpoints`, `data_entities`,
+`out_of_scope`) is the single source of truth for conformance, shared by the write
+skill and the gate.
+
+## Roadmap (M12–M14) — not yet implemented
+
+The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11 is shipped (see the Spec
+Registry architecture section above). These are **planned** — no code exists yet, so
+do **not** add their verify scripts to the non-negotiable list until they exist and
+pass. Guard-rails for the implementing session (one milestone per feature branch →
+PR to `dev`, per PRD §12):
+
 - **M12 Compliance Report** (Spine) — `api/compliance.py` `build_compliance_report(run_id, state)`
   reusing `build_evidence_stack`; `GET /runs/{run_id}/compliance-report`. Packaging,
   not new capability. Target: `verify_m12_compliance.py` 3/3.
@@ -296,4 +314,5 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **MAF pilot is dormant unless opted in (M9)** — `should_use_maf(role)` requires BOTH `CONTINUUM_MAF_AGENTS` to list the role AND the `agent_framework` package to be importable AND a live model resolved. Any MAF failure raises `MAFUnavailable` and `run_agent` falls back to `_run_llm` (then offline). The offline path never reaches MAF.
 - **ASSERT rubric is deterministic + offline (M10)** — `evals/assert_specs.py` specs are pure predicates over state/harness; `judge.score()` never needs credentials. The optional Azure 1–5 rating is a secondary `llm_rating` calibration signal, never the score. A buggy spec is caught and converted to a deterministic `fail` (`_safe_check`), so it can't crash the eval.
 - **OTel export is dormant unless opted in (M10)** — `event_bus.emit()` mirrors events onto OTel spans only when `CONTINUUM_OTEL` is truthy AND `opentelemetry` imports; otherwise `_otel_emit()` is a no-op. Any OTel error is swallowed — telemetry can never break a run, and the offline path never imports OTel.
+- **Spec Registry is append-only + offline-safe (M11)** — `graph_db/spec_registry.py` never edits a spec in place; a materially different spec creates a new version that SUPERSEDES the prior. The module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with no Neo4j; the live Neo4j path runs only when a *connected* driver is passed (`_is_live()`) and any error falls back to the store. The M11 scope-guard branch only fires when `state.registry_current_before` is set, so M0–M10 runs are byte-unchanged. `specs_match()` is the single conformance predicate shared by the write skill and the gate.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
