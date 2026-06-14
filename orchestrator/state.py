@@ -114,6 +114,16 @@ class ContinuumState:
     # Set after emit_pdlc_artifacts() runs; None if CONTINUUM_TARGET_REPO is unset.
     pdlc_path: Optional[str] = None
 
+    # M11: Spec Registry
+    # Deterministic component key this run's spec is filed under.
+    component: Optional[str] = None
+    # Version chain (oldest-first) the BSA retrieved from the Registry this run.
+    registry_specs: List[Dict[str, Any]] = field(default_factory=list)
+    # The prior current Registry spec for this component (None on a first run).
+    registry_current_before: Optional[Dict[str, Any]] = None
+    # {old_id, reason} when this run's spec superseded the prior one; else None.
+    spec_superseded: Optional[Dict[str, Any]] = None
+
     # Metadata
     run_id: Optional[str] = None
     started_at: Optional[float] = None

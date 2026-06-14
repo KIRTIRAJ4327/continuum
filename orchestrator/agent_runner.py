@@ -526,6 +526,26 @@ async def _run_offline(
         if past_episodes:
             result["episodes"] = past_episodes
             logger.info("[BSA] Grounded on %d past episode(s) via GraphRAG", len(past_episodes))
+
+        # M11: Spec Registry — retrieve the prior agreed spec for this component
+        # BEFORE drafting context is finalized, then persist this run's spec as a
+        # new version (recording a supersession if it materially differs).
+        from orchestrator.component import component_slug
+        component = component_slug(state.request, story)
+        registry = await _call(skills.get("query_spec_registry"), ctx, state, component=component) or {}
+        prior = registry.get("current")
+        write_res = await _call(
+            skills.get("write_spec_registry"), ctx, state,
+            component=component, spec_body=spec, request=state.request,
+            run_id=state.run_id or "", prior_spec=prior,
+            supersedes_reason=f"Run {state.run_id or 'n/a'} updated spec for {component}",
+        ) or {}
+        result["component"] = component
+        result["registry_specs"] = registry.get("history", [])
+        result["registry_current_before"] = prior
+        result["spec_superseded"] = write_res.get("superseded")
+        if prior is not None:
+            logger.info("[BSA] M11: grounded on Registry spec v%s for %s", prior.get("version"), component)
         return result
 
     if role == AgentRole.ARCHITECT.value:
@@ -775,6 +795,13 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
         # M3: store past episodes retrieved by GraphRAG.
         if data.get("episodes") is not None:
             state.episodes = data["episodes"]
+        # M11: Spec Registry results.
+        if data.get("component"):
+            state.component = data["component"]
+        if data.get("registry_specs") is not None:
+            state.registry_specs = data["registry_specs"]
+        state.registry_current_before = data.get("registry_current_before")
+        state.spec_superseded = data.get("spec_superseded")
 
     elif role == AgentRole.ARCHITECT.value:
         contract = data.get("contract")
