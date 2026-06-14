@@ -33,7 +33,8 @@
 [![Evolution Tests](https://img.shields.io/badge/Evolution_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Work Queue Tests](https://img.shields.io/badge/WorkQueue_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Scope Guard Tests](https://img.shields.io/badge/ScopeGuard_Tests-2%2F2_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M7_Complete-7C3AED?style=flat-square)]()
+[![Repo Split Tests](https://img.shields.io/badge/RepoSplit_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M8_Complete-7C3AED?style=flat-square)]()
 
 </div>
 
@@ -380,6 +381,40 @@ Proven offline in `scripts/verify_m7_scope_guard.py` → 2/2 PASS.
 
 ---
 
+## 🗂️ Two-Layer Repo Split (M8)
+
+Continuum now writes **Layer 2 artifacts** into a `.pdlc/` directory inside the
+target application repo after every successful run.
+
+```
+Layer 1 — Process (Continuum repo)         Layer 2 — Product (target app)
+  orchestrator/                                your-app/
+  agents/                                        src/
+  skills/                                        tests/
+  evals/                                         .pdlc/           ← Continuum writes here
+  ui/                                              ├── run_manifest.json
+        │                                          ├── evidence.json
+        │  CONTINUUM_TARGET_REPO=/path/to/app      ├── contracts/
+        └──── emit_pdlc_artifacts() ────────────►  │   ├── openapi.yaml
+                                                   │   └── schema.sql
+                                                   └── generated/
+                                                       └── <files from agents>
+```
+
+- **`orchestrator/pdlc.py`** — `emit_pdlc_artifacts(state, target_path)`;
+  pure file I/O, offline-safe, always writes `run_manifest.json` + `evidence.json`.
+- **`skills/emit_pdlc/v1.0/skill.py`** — agent-callable wrapper for the same logic.
+- **`CONTINUUM_TARGET_REPO`** env var (optional) — absolute path to the target
+  app; if unset the run completes normally with no `.pdlc/` written.
+- **`samples/target-app/`** — minimal FastAPI skeleton demonstrating where Layer 2
+  lives; `.pdlc/README.md` explains the convention.
+- **`pdlc_written` event** — emitted to the Activity Stream when artifacts are
+  written, carrying `{pdlc_path, files_written}`.
+
+Proven offline in `scripts/verify_m8_repo_split.py` → 3/3 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -405,7 +440,10 @@ M6 ──── Work Queue UI · 6-layer Evidence Stack · run metrics
   │     ✅  run_status lifecycle · cost + lead-time · blocked/returned · 6/6 PASS
   │
 M7 ──── Mapping Fidelity · D11 Scope-Guard
-        ✅  business_mappings enforced post-implementation · 2/2 PASS
+  │     ✅  business_mappings enforced post-implementation · 2/2 PASS
+  │
+M8 ──── Two-Layer Repo Split · D33 .pdlc/ artifacts
+        ✅  Layer 1 / Layer 2 separation · emit_pdlc_artifacts · 3/3 PASS
 ```
 
 ---
@@ -482,6 +520,7 @@ make verify-m4        # eval CI gate (regression blocking)
 make verify-m5        # evolution agent (governed harness mutation)
 make verify-m6        # work queue + evidence stack + run metrics
 make verify-m7        # mapping fidelity / scope-guard
+make verify-m8        # two-layer repo split / .pdlc/ artifacts
 ```
 
 | Script | Checks | Result |
@@ -493,8 +532,9 @@ make verify-m7        # mapping fidelity / scope-guard
 | `scripts/verify_m5_evolution.py` | observe · diagnose · propose · eval · promote | 6/6 ✅ |
 | `scripts/verify_m6_workqueue.py` | cost accrual · run_status · reject · blocked · evidence | 6/6 ✅ |
 | `scripts/verify_m7_scope_guard.py` | exact match → green · extra code → red/blocked | 2/2 ✅ |
+| `scripts/verify_m8_repo_split.py` | layer-2 placeholder · pdlc write · evidence.json | 3/3 ✅ |
 
-> All 7 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
+> All 8 suites pass with **zero external credentials** — Azure, Neo4j, and ADO are optional. Missing credentials activate the deterministic offline path automatically.
 
 ---
 

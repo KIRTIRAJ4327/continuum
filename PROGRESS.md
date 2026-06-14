@@ -16,6 +16,57 @@ Entry format:
 
 ---
 
+## 2026-06-13 — M8: Two-Layer Repo Split / .pdlc/ (M8)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+
+**What:** Implemented M8 from `M6-M10-Upgrade-Plan.md`. Layer 1 (Continuum
+pipeline) is now architecturally separated from Layer 2 (target application).
+After a pipeline run, `emit_pdlc_artifacts()` writes a `.pdlc/` directory into
+the target repo containing: `run_manifest.json`, `evidence.json` (6-layer
+Evidence Stack), `contracts/openapi.yaml`, `contracts/schema.sql`, and
+`generated/<files>`. Wired into `_execute_pipeline` via the `CONTINUUM_TARGET_REPO`
+env var (non-fatal if absent). A minimal `samples/target-app/` skeleton
+demonstrates where Layer 2 lives. `pdlc_written` event surfaces in the ActivityStream.
+
+**Files:**
+- `orchestrator/pdlc.py` (new) — `emit_pdlc_artifacts(state, target_path)`;
+  pure file I/O, offline-safe.
+- `skills/emit_pdlc/v1.0/skill.py` (new) — agent-callable wrapper around the
+  orchestrator module.
+- `orchestrator/state.py` — added `pdlc_path: Optional[str] = None`.
+- `api/main.py` — added `os` import, `from orchestrator.pdlc import
+  emit_pdlc_artifacts`; wired M8 step after Memory in `_execute_pipeline`
+  (conditional on `CONTINUUM_TARGET_REPO`); `_state_to_dict` exposes `pdlc_path`.
+- `samples/target-app/` (new) — minimal FastAPI skeleton with `.pdlc/README.md`
+  explaining the two-layer architecture.
+- `ui/src/types.ts` — added `pdlc_written` to `EventType`.
+- `ui/src/components/ActivityStream.tsx` — style + summary for `pdlc_written` event.
+- `scripts/verify_m8_repo_split.py` (new) + `Makefile` `verify-m8` target.
+- `CLAUDE.md` — added `verify_m8_repo_split.py` to non-negotiable rules.
+
+**Verification:**
+- `python scripts/verify_agent_core.py` → 11/11 PASS
+- `python scripts/verify_m0_loop.py` → 3/3 PASS
+- `python scripts/verify_m6_workqueue.py` → 6/6 PASS
+- `python scripts/verify_m7_scope_guard.py` → 2/2 PASS
+- `python scripts/verify_m8_repo_split.py` → 3/3 PASS
+- `python evals/ci_gate.py` → exit 0 (no regression vs baseline)
+- `cd ui && npm run build` → tsc + vite build clean (212 modules)
+
+**Notes / follow-ups:**
+- `emit_pdlc_artifacts` is non-fatal in the pipeline — if `CONTINUUM_TARGET_REPO`
+  is unset (standard offline mode), no `.pdlc/` is written and the run completes
+  normally. All verify suites still pass without the env var set.
+- The `samples/target-app/.pdlc/` directory is tracked in git (contains only a
+  README). After a real run, the operator decides whether to commit the run
+  artifacts (for audit trail) or add `.pdlc/` to the target app's `.gitignore`.
+- `pdlc_written` event carries `{pdlc_path, files_written}` so the UI (Activity
+  tab) can confirm Layer 2 write.
+- **Next:** M9 (MAF Harness Pilot) — wrap the Backend agent on Microsoft Agent
+  Framework on a branch. See `M6-M10-Upgrade-Plan.md`.
+
+---
+
 ## 2026-06-13 — M7: Mapping Fidelity / Scope-Guard (M7)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 

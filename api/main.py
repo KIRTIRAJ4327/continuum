@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +29,7 @@ from pydantic import BaseModel
 from orchestrator.agent_runner import AgentContext, run_agent
 from orchestrator.events import event_bus
 from orchestrator.gates import gate_scope_conformance, update_gate_status
+from orchestrator.pdlc import emit_pdlc_artifacts
 from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
 
@@ -154,6 +156,7 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "reject_reason": state.reject_reason,
         "business_mappings": getattr(state, "business_mappings", []) or [],
         "mapping_fidelity": getattr(state, "mapping_fidelity", None),
+        "pdlc_path": getattr(state, "pdlc_path", None),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -340,6 +343,28 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     # M6: only mark `done` if we didn't get parked in blocked/returned/failed.
     if state.run_status not in _EXPLICIT_STATES:
         state.run_status = "done"
+
+    # M8: emit .pdlc/ artifacts to the target repo (Layer 2) if configured.
+    target_repo = os.getenv("CONTINUUM_TARGET_REPO", "").strip()
+    if target_repo:
+        try:
+            pdlc_result = await emit_pdlc_artifacts(state, target_repo)
+            state.pdlc_path = pdlc_result.get("pdlc_path", "")
+            if run_id:
+                await event_bus.emit(run_id, {
+                    "event_type": "pdlc_written",
+                    "agent": "pipeline",
+                    "run_id": run_id,
+                    "data": {
+                        "pdlc_path": state.pdlc_path,
+                        "files_written": pdlc_result.get("files_written", 0),
+                    },
+                })
+            logger.info(
+                "M8 pdlc: %d files → %s", pdlc_result.get("files_written", 0), state.pdlc_path
+            )
+        except Exception as pdlc_exc:  # noqa: BLE001
+            logger.warning("M8: emit_pdlc_artifacts failed (non-fatal): %s", pdlc_exc)
 
     if run_id:
         await event_bus.emit(run_id, {

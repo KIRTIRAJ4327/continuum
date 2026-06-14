@@ -9,7 +9,8 @@ export type EventType =
   | 'human_gate_resolved'
   | 'run_complete'
   | 'run_blocked'      // M6: gate stayed red past max retries
-  | 'run_returned';    // M6: human rejected a story/design gate
+  | 'run_returned'     // M6: human rejected a story/design gate
+  | 'pdlc_written';   // M8: .pdlc/ artifacts written to target repo
 
 export interface AgentEvent {
   event_type: EventType;

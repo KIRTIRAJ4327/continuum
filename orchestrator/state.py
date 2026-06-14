@@ -109,6 +109,11 @@ class ContinuumState:
     # Shape: {supplied, found, extra_in_code, missing_in_code, exact_match}
     mapping_fidelity: Optional[Dict[str, Any]] = None
 
+    # M8: Two-Layer Repo Split (D33)
+    # Absolute path of the .pdlc/ directory written into the target app repo.
+    # Set after emit_pdlc_artifacts() runs; None if CONTINUUM_TARGET_REPO is unset.
+    pdlc_path: Optional[str] = None
+
     # Metadata
     run_id: Optional[str] = None
     started_at: Optional[float] = None

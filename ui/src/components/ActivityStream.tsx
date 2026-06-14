@@ -15,8 +15,9 @@ const EVENT_STYLES: Record<string, { icon: string; color: string }> = {
   human_gate_pending:   { icon: '⏸', color: 'text-amber-300' },
   human_gate_resolved:  { icon: '▶', color: 'text-green-300' },
   run_complete:         { icon: '■', color: 'text-slate-400' },
-  run_blocked:          { icon: '▲', color: 'text-rose-400'  },
-  run_returned:         { icon: '↩', color: 'text-rose-400'  },
+  run_blocked:          { icon: '▲', color: 'text-rose-400'   },
+  run_returned:         { icon: '↩', color: 'text-rose-400'   },
+  pdlc_written:         { icon: '▣', color: 'text-violet-400' },
 };
 
 function fmtTime(ts: number): string {
@@ -48,6 +49,8 @@ function eventSummary(ev: AgentEvent): string {
       return `Run BLOCKED at ${ev.data?.gate_name ?? ''} — needs implementation fix`;
     case 'run_returned':
       return `Run RETURNED at ${ev.data?.gate ?? ''}${ev.data?.reason ? ` — ${ev.data.reason}` : ''}`;
+    case 'pdlc_written':
+      return `Layer 2 artifacts written (${ev.data?.files_written ?? 0} files → .pdlc/)`;
     default:
       return ev.event_type;
   }

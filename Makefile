@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -17,6 +17,7 @@ help:
 	@echo "  make verify-m5      — Run M5 Evolution Agent demo (6/6)"
 	@echo "  make verify-m6      — Run M6 Work Queue + Evidence Stack demo (6/6)"
 	@echo "  make verify-m7      — Run M7 Mapping Fidelity / Scope-Guard demo (2/2)"
+	@echo "  make verify-m8      — Run M8 Two-Layer Repo Split demo (3/3)"
 	@echo "  make evo-observe    — Print current failure patterns from event history"
 	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
 	@echo "  make evo-promote    — List pending proposals; apply by ID"
@@ -93,6 +94,10 @@ verify-m6:
 verify-m7:
 	@echo "Running M7 Mapping Fidelity / Scope-Guard verification (2/2)..."
 	python scripts/verify_m7_scope_guard.py
+
+verify-m8:
+	@echo "Running M8 Two-Layer Repo Split verification (3/3)..."
+	python scripts/verify_m8_repo_split.py
 
 evo-observe:
 	@echo "Current failure patterns from event history:"
