@@ -16,6 +16,58 @@ Entry format:
 
 ---
 
+## 2026-06-14 — PRD v3.0 adoption + M11–M14 / P0–P2 roadmap docs (docs)
+**Branch:** `feature/prd-v3-roadmap-docs`  ·  **Commit:** pending
+
+**What:** Adopted **PRD v3.0** (supersedes v2.2) and documented the forward roadmap.
+Docs-only — no behaviour change, no new milestone code. v3.0 reframes the project:
+M0–M10 are the *delivered baseline*; M11–M14 (Spec Registry, Compliance Report,
+15-State Machine, MAF Graduation) are a sequenced **feature track** (Spine M11–M12
+shippable now, Frontier M13–M14 gated on them). Also folded in a user-requested
+**production-readiness track (P0–P2)**: five gaps between "sound POC" and "system a
+bank can run" — P0 durable execution / sandbox hardening / auth+tenancy, P1 gate
+independence / observability / M12, P2 M11 / M13 / Hyperlight / concurrency. The
+honest reframe carried into the docs: P0 hardening (esp. P0.1 wiring `ContinuumGraph`
++ Postgres checkpointer as the live path, retiring in-memory `_RUNS`) precedes the
+feature milestones; OQ-3 (Evidence Stack layers 1+2 are the same `gate_local_verify`)
+is resolved only by P1.1's gate split; M14/Hyperlight are explicitly not
+offline-verifiable. The non-negotiable verify list was deliberately **not** extended
+with M11–M14 scripts (they don't exist yet).
+
+**Files:**
+- `Continuum-PRD-v3.0.md` (new) — full PRD v3.0 verbatim; `Continuum-Agentic-SDLC-PRD.md`
+  (v2.2) retained as superseded history.
+- `README.md` — milestone badge `M0–M10_Shipped` + new `Roadmap` badge; timeline
+  extended with 🔜 M11–M14 rows; new "🧭 Roadmap" section (feature track table +
+  production-readiness P0–P2 table + honesty notes); verification matrix gains a
+  "Planned (M11–M14)" sub-list clearly marked *not implemented*; doc table adds the
+  v3.0 row (v2.2 relabelled superseded); doc badge → PRD v3.0.
+- `CLAUDE.md` — PRD v3.0 pointer in intro; new "Roadmap (M11–M14)" + "Production
+  Readiness (P0–P2)" sections as implementing-session guard-rails (mirror Neo4jDriver
+  3-tier fallback for M11, distinct from the existing `write_spec` skill, etc.).
+- `PROGRESS.md` — this entry.
+
+**Verification:** docs-only, so the bar is "nothing regressed". Full offline suite
+re-run, all green:
+- `verify_agent_core.py` → ALL PASS (11/11)
+- `verify_m0_loop.py` → ALL PASS (3/3)
+- `verify_m3_learning.py` → ALL PASS (6/6)
+- `verify_m5_evolution.py` → OK (6/6)
+- `verify_m6_workqueue.py` → OK (6/6)
+- `verify_m7_scope_guard.py` → 2/2
+- `verify_m8_repo_split.py` → 3/3
+- `verify_m9_maf_pilot.py` → 6/6
+- `verify_m10_assert.py` → 6/6
+- `evals/ci_gate.py` → exit 0 (no regression)
+
+**Notes / follow-ups:** Recommended next implementation is **P0.1 durable execution**
+(highest-leverage, internal-only) per the production track, or **M11 Spec Registry**
+per the feature track — a detailed M11 design exists from this session's planning
+(spec_registry driver methods, two new skills, scope-guard extension, 4/4 verify).
+Each milestone is its own feature branch → PR to `dev` (PRD §12).
+
+---
+
 ## 2026-06-14 — M10: ASSERT / Rubric Eval Integration (M10)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 

@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Continuum** — an enterprise agentic SDLC pipeline. Accepts a plain-English feature request and produces a merge-ready PR by running a graph of specialised AI agents. Human approval gates block the graph at `story_review`, `design_review`, and `merge_review`.
 
+The active product spec is **`Continuum-PRD-v3.0.md`** (M0–M10 delivered baseline + M11–M14 roadmap). M0–M10 are shipped and offline-verified; the forward roadmap and the production-readiness track (P0–P2) are documented in the "Roadmap" and "Production Readiness" sections below.
+
 ## Non-negotiable Rules
 
 Before every commit, all checks must pass:
@@ -184,6 +186,64 @@ Proposals that would regress any eval metric are auto-rejected by the evaluator 
 ### Dynamic decomposer (`orchestrator/decomposer.py`, M5)
 
 `generate_script(dag, max_agents=4, token_budget=50000)` produces a deterministic Python script that fans out to N parallel subagent slots when the Planner DAG has ≥ 5 tasks. The script is stored in `state.decomposition_script` for operator inspection; the linear DB→BE→FE chain still runs by default.
+
+## Roadmap (M11–M14) — not yet implemented
+
+The active spec is **`Continuum-PRD-v3.0.md`** (§8). These are **planned** — no code
+exists yet, so do **not** add their verify scripts to the non-negotiable list until
+they exist and pass. Guard-rails for the implementing session (one milestone per
+feature branch → PR to `dev`, per PRD §12):
+
+- **M11 Spec Registry** (Spine) — persistent, versioned Neo4j spec store. New
+  `graph_db/spec_registry.py` mirrors `Neo4jDriver`'s three-tier fallback (live →
+  `_in_memory_specs` list → pure-Python offline match — copy the `write_episode` /
+  `get_similar_episodes` shape). New skills `query_spec_registry` + `write_spec_registry`
+  (**distinct** from the existing `write_spec` skill, which only formats a spec into
+  state — do not rename it). `GET /specs/{component}` + `GET /specs`. Extend
+  `gate_scope_conformance` so a run conforms to **or explicitly supersedes** the
+  Registry spec for its component. Cross-run persistence in one API process needs a
+  process-level driver singleton (or skills that lazily fetch it). Target: `verify_m11_spec_registry.py` 4/4.
+- **M12 Compliance Report** (Spine) — `api/compliance.py` `build_compliance_report(run_id, state)`
+  reusing `build_evidence_stack`; `GET /runs/{run_id}/compliance-report`. Packaging,
+  not new capability. Target: `verify_m12_compliance.py` 3/3.
+- **M13 15-State Machine** (Frontier, gated on M11+M12) — `orchestrator/state_machine.py`
+  + `orchestrator/policy_engine.py` `can_transition(artifact, from_state, to_state) -> (bool, reason)`;
+  `lifecycle_state` becomes the artifact's system of record; G1–G4 named gates. This
+  is the reconciliation of the PRD's aspirational "9 stages" — it does not exist today.
+  Target: `verify_m13_state_machine.py` 6/6.
+- **M14 MAF Graduation** (Frontier, gated on M13) — graduates the M9 pilot; **not
+  offline-verifiable** (needs `agent_framework` + Hyperlight). Keep the
+  dormant-unless-opted-in convention; never claim a passing offline badge.
+
+Convention reminders (PRD §12): events are plain dicts
+`{event_type, agent, run_id, data, timestamp}`; `started_at`/`completed_at` are
+`Optional[float]`; UI uses Unicode glyphs (no icon lib); `api/main.py`'s
+`_execute_pipeline()` + `_RUNS` is the live path (`graph.py`'s `ContinuumGraph` is
+not); **every** new field/event/skill must be offline-safe.
+
+## Production Readiness (P0–P2) — operational track
+
+The architecture is production-grade; these five gaps are *hardening*, not redesign.
+Sequenced P0→P2, and **P0 comes before the M11–M14 feature milestones**. Largely
+operational and partly not offline-verifiable — but the offline-safe invariant for
+the verify suite still holds throughout.
+
+- **P0.1 Durable execution** — wire `graph.py` / `ContinuumGraph` + the Postgres
+  LangGraph checkpointer as the *actual* live path and retire the in-memory `_RUNS`
+  dict, so runs survive a process restart and resume from the last checkpoint.
+  Highest-leverage, almost entirely internal — recommended next.
+- **P0.2 Sandbox hardening** — `sandbox/` must provision a real ACA/Hyper-V session
+  with lifecycle + timeout + egress + credential isolation; **no local-exec fallback
+  in production** (offline stub stays for the verify suite only).
+- **P0.3 Auth + tenancy** ("M-Auth", ideally before M11) — identity on every run and
+  gate approval, RBAC (dev/reviewer/admin), per-tenant Neo4j subgraph / audit trail /
+  spec registry. This is the gate for any real-client use.
+- **P1.1 Gate independence** — split `gate_local_verify` into `gate_lint` /
+  `gate_typecheck` / `gate_test`, each with its own pass/fail + retry budget +
+  evidence record. Makes the Evidence Stack's "6 independent signals" literally true
+  (resolves OQ-3) and makes M12's compliance claims defensible.
+- **P1.2 Observability** — OTel (M10 hook) exported to App Insights / Langfuse: real
+  traces, real cost (not the offline `$0.02` stub), per-stage latency, stuck-run alerts.
 
 ## Adding a New Skill
 
