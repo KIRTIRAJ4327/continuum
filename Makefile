@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -22,6 +22,7 @@ help:
 	@echo "  make verify-m10     — Run M10 ASSERT / Rubric Eval demo (6/6)"
 	@echo "  make verify-m11     — Run M11 Spec Registry demo (4/4)"
 	@echo "  make verify-m12     — Run M12 Compliance Report demo (3/3)"
+	@echo "  make verify-m13     — Run M13 15-State Machine demo (6/6)"
 	@echo "  make evo-observe    — Print current failure patterns from event history"
 	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
 	@echo "  make evo-promote    — List pending proposals; apply by ID"
@@ -118,6 +119,10 @@ verify-m11:
 verify-m12:
 	@echo "Running M12 Compliance Report verification (3/3)..."
 	python scripts/verify_m12_compliance.py
+
+verify-m13:
+	@echo "Running M13 15-State Machine verification (6/6)..."
+	python scripts/verify_m13_state_machine.py
 
 evo-observe:
 	@echo "Current failure patterns from event history:"

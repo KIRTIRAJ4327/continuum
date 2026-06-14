@@ -23,6 +23,7 @@ python scripts/verify_m9_maf_pilot.py   # must print 6/6
 python scripts/verify_m10_assert.py     # must print 6/6
 python scripts/verify_m11_spec_registry.py # must print 4/4
 python scripts/verify_m12_compliance.py     # must print 3/3
+python scripts/verify_m13_state_machine.py  # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -55,6 +56,7 @@ make verify-m9        # 6/6 MAF Harness Pilot
 make verify-m10       # 6/6 ASSERT / Rubric Eval Integration
 make verify-m11       # 4/4 Spec Registry
 make verify-m12       # 3/3 Compliance Report
+make verify-m13       # 6/6 15-State SDLC Machine
 
 # Tests, lint, types
 pytest -q
@@ -232,19 +234,37 @@ in-memory event bus when not injected; `config`/`git` are best-effort lazy looku
 (`render_compliance_html`). Approver identity/timestamps are explicit nulls until
 auth lands (P0.3).
 
-## Roadmap (M13–M14) — not yet implemented
+### 15-State SDLC Machine (`orchestrator/state_machine.py` + `policy_engine.py`, M13)
 
-The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11 and M12 are shipped (see the
-Spec Registry and Compliance Report architecture sections above). These are
-**planned** — no code exists yet, so do **not** add their verify scripts to the
-non-negotiable list until they exist and pass. Guard-rails for the implementing
-session (one milestone per feature branch → PR to `dev`, per PRD §12):
+The lifecycle is an explicit, policy-governed graph. `state_machine.py` *declares*
+it (pure data, zero orchestrator imports so `state.py` can import `SDLCState`
+cycle-free): the 15 `SDLCState`s (`NEW → … → CLOSED`), a `StateDefinition` per state
+(entry `required_artifacts` + `quality_gates`, allowed `forward` + `returns` edges,
+SLA), and `TRANSITION_GATES` mapping the four named human gates to the exact edges
+they govern — **G1** NEW→EPIC_APPROVED, **G2** ARCH_READY→IMPL_READY, **G3**
+RELEASE_READY→DEPLOYED, **G4** IN_PRODUCTION→IN_PROGRESS (incident return). Return
+edges (tests-fail, security findings, prod incident) are first-class.
 
-- **M13 15-State Machine** (Frontier, gated on M11+M12) — `orchestrator/state_machine.py`
-  + `orchestrator/policy_engine.py` `can_transition(artifact, from_state, to_state) -> (bool, reason)`;
-  `lifecycle_state` becomes the artifact's system of record; G1–G4 named gates. This
-  is the reconciliation of the PRD's aspirational "9 stages" — it does not exist today.
-  Target: `verify_m13_state_machine.py` 6/6.
+`policy_engine.py` *enforces* it: `can_transition(artifact, from_state, to_state)
+-> (ok, reason)` is a pure predicate checking, in order, edge-exists → human gate
+granted → required artifacts present → quality gates green. `advance(artifact,
+to_state)` mutates `artifact.lifecycle_state` only when the policy permits. Both read
+the artifact (a `ContinuumState`) via `getattr`, so they never import `state.py`.
+
+`ContinuumState.lifecycle_state` (default `SDLCState.NEW`) is the artifact's record;
+`incident_approved` grants G4. The live `_execute_pipeline()` path is **unchanged** —
+the API surfaces a read-only `lifecycle_state` via `derive_lifecycle_state(artifact)`
+(best-effort, never raises), and the existing `story/design/merge` approvals map to
+G1/G2/G3 (`GATE_APPROVAL_FIELD`). Wiring the policy engine as the live *gating*
+mechanism (replacing `_route()`) is a follow-up tied to P0.1.
+
+## Roadmap (M14) — not yet implemented
+
+The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11, M12 and M13 are shipped (see
+the architecture sections above). M14 is **planned** — no code exists yet, so do
+**not** add its verify script to the non-negotiable list until it exists. Guard-rails
+(one milestone per feature branch → PR to `dev`, per PRD §12):
+
 - **M14 MAF Graduation** (Frontier, gated on M13) — graduates the M9 pilot; **not
   offline-verifiable** (needs `agent_framework` + Hyperlight). Keep the
   dormant-unless-opted-in convention; never claim a passing offline badge.
@@ -332,4 +352,5 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **OTel export is dormant unless opted in (M10)** — `event_bus.emit()` mirrors events onto OTel spans only when `CONTINUUM_OTEL` is truthy AND `opentelemetry` imports; otherwise `_otel_emit()` is a no-op. Any OTel error is swallowed — telemetry can never break a run, and the offline path never imports OTel.
 - **Spec Registry is append-only + offline-safe (M11)** — `graph_db/spec_registry.py` never edits a spec in place; a materially different spec creates a new version that SUPERSEDES the prior. The module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with no Neo4j; the live Neo4j path runs only when a *connected* driver is passed (`_is_live()`) and any error falls back to the store. The M11 scope-guard branch only fires when `state.registry_current_before` is set, so M0–M10 runs are byte-unchanged. `specs_match()` is the single conformance predicate shared by the write skill and the gate.
 - **Compliance Report is total + honest (M12)** — `build_compliance_report()` always returns all 8 sections; absent data is an explicit `null`/`[]` with a `_missing_reason` and is listed in `missing` (never silently dropped). It is pure/offline (event-bus audit trail, lazy `config`/`git`), reuses `build_evidence_stack`, and never asserts more than the run actually proved — a blocked/returned run yields a valid report whose `compliance_assertions.passed` is honestly `False`.
+- **State machine governs, offline-safe (M13)** — `policy_engine.can_transition()` is a pure predicate over the artifact and the declared `state_machine.py` graph (edge → gate → artifacts → quality gates); `state_machine.py` imports nothing from the orchestrator so `state.py` can import `SDLCState` cycle-free. The live `_execute_pipeline()` path is unchanged — `lifecycle_state` is surfaced read-only via `derive_lifecycle_state()` (best-effort, never raises). M0–M12 runs are byte-unchanged.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
