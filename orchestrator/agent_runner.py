@@ -1211,7 +1211,20 @@ async def run_agent(
     data: dict = {}
     try:
         if model is not None:
-            data = await _run_llm(model, spec, state, skills, ctx)
+            # M9: opted-in roles run on the Microsoft Agent Framework pilot.
+            # Any MAF problem degrades to the LangChain loop (then offline below).
+            from .maf_runner import MAFUnavailable, run_maf_agent, should_use_maf
+            if should_use_maf(role):
+                try:
+                    data = await run_maf_agent(spec, state, skills, ctx)
+                except MAFUnavailable as exc:
+                    logger.warning(
+                        "[%s] MAF unavailable (%s) — falling back to LangChain loop",
+                        role.upper(), exc,
+                    )
+                    data = await _run_llm(model, spec, state, skills, ctx)
+            else:
+                data = await _run_llm(model, spec, state, skills, ctx)
         else:
             data = await _run_offline(role, state, skills, ctx)
     except Exception as exc:  # noqa: BLE001 - never crash the graph on agent failure

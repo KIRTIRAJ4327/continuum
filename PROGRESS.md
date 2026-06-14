@@ -16,6 +16,131 @@ Entry format:
 
 ---
 
+## 2026-06-14 — M10: ASSERT / Rubric Eval Integration (M10)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+
+**What:** Implemented M10 from `M6-M10-Upgrade-Plan.md` — the final Frontier
+milestone. Replaced the bespoke 1–5 LLM "judge" with declarative, machine-checkable
+**ASSERT specs**: a registry of rubrics, one or more per governance Rule (1–9) plus
+the M7 scope invariant. `evals/scorers/judge.py` now reports the weighted pass rate
+over the applicable *trial* specs (Rules 1, 2, 4, 8 + M7 scope) — fully deterministic
+and offline. The optional Azure 1–5 rating is kept only as a secondary `llm_rating`
+calibration signal; it no longer drives the score. Governance specs (Rules 3, 5, 6,
+7, 9) grade the harness itself. The Evidence Stack can now annotate each layer with
+the rubric verdict backing it, and the event bus gained an opt-in, offline-safe OTel
+export. The `pass^k` runner and `ci_gate` are unchanged in shape — `judge.score()`
+keeps its public contract. judge_avg rose 0.40 → 1.00 (the rubric is now a hard,
+deterministic gate); baseline.json re-locked to 1.00.
+
+**Files:**
+- `evals/assert_specs.py` (new) — `AssertSpec` dataclass; `TRIAL_SPECS` +
+  `GOVERNANCE_SPECS` registries; `evaluate_specs()`, `evaluate_governance()`,
+  `evaluate_all()`, `all_rule_ids()`, `_safe_check()` (buggy spec → deterministic
+  fail). Pure, offline, no LLM.
+- `evals/scorers/judge.py` — rewritten to be ASSERT-driven. `score()` returns
+  `{value, reason, method ("assert"|"assert+llm"), specs, heuristic_value,
+  needs_human_review, llm_rating}`. Optional `_llm_rating()` enrichment only flags
+  calibration disagreement. `_heuristic_score()` kept as a back-compat shim.
+- `evals/evidence_stack.py` — `build_evidence_stack(state, asserts=None)`; when the
+  `specs` mapping is supplied, each layer gets `assert_rule` + `assert_verdict`.
+  `asserts=None` → identical pre-M10 6-layer shape (verify-m6/m7/m8 unaffected).
+- `orchestrator/events.py` — opt-in OTel mirror: `otel_enabled()`, `_get_tracer()`
+  (cached), `_otel_emit()` wired into `emit()`, `_reset_otel_cache()` test hook.
+  No-op unless `CONTINUUM_OTEL` set AND `opentelemetry` importable; errors swallowed.
+- `scripts/verify_m10_assert.py` (new) + `Makefile` `verify-m10` target.
+- `evals/results/baseline.json` — judge_avg re-locked 0.40 → 1.00 (intentional;
+  ci_gate exits 0, this is an improvement not a regression).
+- `.gitignore` — ignore transient `evals/results/pass_k_*.json`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, eval-harness + ASSERT sections,
+  `CONTINUUM_OTEL` env var, two new invariants, badges, timeline, verification matrix.
+
+**Verification:**
+- `python scripts/verify_agent_core.py` → 11/11 PASS
+- `python scripts/verify_m0_loop.py` → 3/3 PASS
+- `python scripts/verify_m3_learning.py` → 6/6 PASS
+- `python scripts/verify_m5_evolution.py` → 6/6 PASS
+- `python scripts/verify_m6_workqueue.py` → 6/6 PASS
+- `python scripts/verify_m7_scope_guard.py` → 2/2 PASS
+- `python scripts/verify_m8_repo_split.py` → 3/3 PASS
+- `python scripts/verify_m9_maf_pilot.py` → 6/6 PASS
+- `python scripts/verify_m10_assert.py` → 6/6 PASS
+- `python evals/ci_gate.py` → exit 0 (det/per-trial/pass^k stable; judge_avg 0.40→1.00 improve, re-baselined)
+- `python evals/pass_k_runner.py --k 2 --filter crud-01` → runs clean (judge=1.00 reflects ASSERT)
+
+**Notes / follow-ups:**
+- ASSERT rubric is deterministic offline → judge_avg is a stable 1.00 for the
+  golden cases (the 4 applicable trial specs all pass; M7 scope is `na` because the
+  golden cases supply no business_mappings). Re-baselining to 1.00 turns the rubric
+  into a real hard gate: any future run that regresses a Rule now trips ci_gate.
+- The deterministic `pass` gate (weighted ≥ 0.8) is unchanged and still governs
+  per-trial pass/fail — ASSERT enriches the *judge* dimension only. det_weighted,
+  per_trial_rate, pass_k_rate are byte-identical to the pre-M10 baseline.
+- OTel is live-only/optional (like Azure/Neo4j/ADO/MAF): the canonical offline env
+  has no `opentelemetry` package, so the export stays a no-op and is never imported.
+  The verify script proves the no-op holds both with the flag unset and with the flag
+  set but the package absent, and that events still flow.
+- **Next:** M6–M10 plan complete. Future work could wire OTel spans to a live
+  collector, add ASSERT specs for new rules as they land, and surface per-layer
+  `assert_verdict` in the UI Evidence tab.
+
+---
+
+## 2026-06-14 — M9: MAF Harness Pilot (M9)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+
+**What:** Implemented M9 from `M6-M10-Upgrade-Plan.md`. Piloted an alternative
+agent-execution path on the Microsoft Agent Framework (MAF) for one opted-in
+agent (Backend), letting MAF own the tool-calling loop instead of the hand-rolled
+`_run_llm` loop. The pilot is **opt-in (default off)**, gated on both the
+`CONTINUUM_MAF_AGENTS` env flag AND the `agent_framework` package being importable
+AND a live model being resolved. Any MAF problem degrades to the LangChain loop,
+then offline — so a missing/broken MAF install can never break a run. In the
+offline/thin environment the pilot is fully dormant and the deterministic path is
+byte-for-byte unchanged.
+
+**Files:**
+- `orchestrator/maf_runner.py` (new) — `MAFUnavailable`, `maf_enabled_roles()`,
+  `maf_package_available()` (cached), `should_use_maf(role)`, `maf_tool_specs()`,
+  `run_maf_agent(spec, state, skills, ctx)`. Lazily imports `agent_framework`;
+  reuses `agent_runner`'s prompt/parse/skill-invocation helpers via deferred
+  imports (no import cycle).
+- `orchestrator/agent_runner.py` — `run_agent()` dispatch now routes opted-in
+  roles to `run_maf_agent()`, with `MAFUnavailable` → `_run_llm` fallback inside
+  the existing outer try (which still falls back to offline).
+- `scripts/verify_m9_maf_pilot.py` (new) + `Makefile` `verify-m9` target.
+- `CLAUDE.md` — execution-model diagram + dispatch description updated; new env
+  vars (`CONTINUUM_MAF_AGENTS`, `CONTINUUM_TARGET_REPO`); new MAF invariant; added
+  `verify_m9_maf_pilot.py` to non-negotiable rules.
+
+**Verification:**
+- `python scripts/verify_agent_core.py` → 11/11 PASS
+- `python scripts/verify_m0_loop.py` → 3/3 PASS
+- `python scripts/verify_m3_learning.py` → 6/6 PASS
+- `python scripts/verify_m5_evolution.py` → 6/6 PASS
+- `python scripts/verify_m6_workqueue.py` → 6/6 PASS
+- `python scripts/verify_m7_scope_guard.py` → 2/2 PASS
+- `python scripts/verify_m8_repo_split.py` → 3/3 PASS
+- `python scripts/verify_m9_maf_pilot.py` → 6/6 PASS
+- `python evals/ci_gate.py` → exit 0 (no regression vs baseline)
+- `cd ui && npm run build` → clean (328 kB bundle)
+
+**Notes / follow-ups:**
+- MAF (`agent-framework`) is an optional live-only dependency — not installed in
+  the canonical offline env, and there are no Azure creds here, so the *live* MAF
+  call cannot be exercised in this environment. This mirrors how Azure/Neo4j/ADO
+  live paths are already handled: lazily imported, best-effort, always with a
+  deterministic fallback. The verify script proves the parts that ARE offline-
+  testable: capability gating, opt-in semantics, env parsing, `MAFUnavailable`
+  on missing package, and the MAF→LangChain fallback routing (via monkeypatch).
+- The MAF API surface (`AzureOpenAIChatClient.create_agent(...).run(...)`) is
+  pinned to the published `agent-framework` package; every MAF call is wrapped so
+  any API drift raises `MAFUnavailable` and falls back rather than crashing.
+- **Next:** M10 (ASSERT / Rubric Eval Integration) — replace
+  `evals/scorers/judge.py` with ASSERT specs for Rules 1–9 + the M7 scope
+  invariant; keep the `pass^k` runner. See `M6-M10-Upgrade-Plan.md`.
+
+---
+
 ## 2026-06-13 — M8: Two-Layer Repo Split / .pdlc/ (M8)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 
