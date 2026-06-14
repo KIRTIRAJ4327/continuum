@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
 
+from orchestrator.state_machine import SDLCState
+
 
 class AgentRole(str, Enum):
     ORCHESTRATOR = "orchestrator"
@@ -123,6 +125,11 @@ class ContinuumState:
     registry_current_before: Optional[Dict[str, Any]] = None
     # {old_id, reason} when this run's spec superseded the prior one; else None.
     spec_superseded: Optional[Dict[str, Any]] = None
+
+    # M13: 15-State SDLC lifecycle (the artifact's system of record).
+    lifecycle_state: "SDLCState" = field(default=SDLCState.NEW)
+    # G4 (Critical Incident Approval) grant — return edge IN_PRODUCTION → IN_PROGRESS.
+    incident_approved: bool = False
 
     # Metadata
     run_id: Optional[str] = None

@@ -33,6 +33,7 @@ from orchestrator.pdlc import emit_pdlc_artifacts
 from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
 from api.compliance import build_compliance_report, render_compliance_html
+from orchestrator.state_machine import derive_lifecycle_state
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,14 @@ _STAGE_INDEX: Dict[str, int] = {
 _STAGE_COUNT = 8
 
 
+def _lifecycle_state(state: ContinuumState) -> str:
+    """M13: best-effort lifecycle state for the run (read-only, never raises)."""
+    try:
+        return derive_lifecycle_state(state)
+    except Exception:  # noqa: BLE001
+        return "new"
+
+
 def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
     """Serialise state for JSON responses."""
     return {
@@ -160,6 +169,7 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "pdlc_path": getattr(state, "pdlc_path", None),
         "component": getattr(state, "component", None),
         "spec_superseded": getattr(state, "spec_superseded", None),
+        "lifecycle_state": _lifecycle_state(state),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }

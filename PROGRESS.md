@@ -16,6 +16,54 @@ Entry format:
 
 ---
 
+## 2026-06-14 — M13: 15-State SDLC Machine + Policy Engine (M13)
+**Branch:** `feature/m13-state-machine` (stacked on `feature/m12-compliance`)  ·  **Commit:** pending
+
+**What:** Implemented M13 from `Continuum-PRD-v3.0.md` §8 — the first Frontier
+milestone (unblocked now M11+M12 shipped). The SDLC lifecycle is now an explicit,
+policy-governed graph instead of being implicit in routing code. `state_machine.py`
+**declares** the 15 states (`NEW → … → CLOSED`), each with entry criteria
+(`required_artifacts` + `quality_gates`), allowed `forward`/`returns` edges, and the
+four named human gates (`TRANSITION_GATES`: G1 NEW→EPIC_APPROVED, G2 ARCH_READY→
+IMPL_READY, G3 RELEASE_READY→DEPLOYED, G4 IN_PRODUCTION→IN_PROGRESS incident return).
+`policy_engine.py` **enforces** it: `can_transition(artifact, from, to) -> (ok,
+reason)` is a pure predicate (edge → gate → artifacts → quality gates), and
+`advance()` mutates `lifecycle_state` only when permitted. Return/exception edges
+(tests-fail, security-findings, prod-incident) are first-class. The live
+`_execute_pipeline()` path is **deliberately unchanged** — `lifecycle_state` is the
+new `ContinuumState` field (system of record) and the API surfaces a read-only value
+via `derive_lifecycle_state()`; existing story/design/merge approvals map to G1/G2/G3.
+Wiring the policy engine as the live *gating* mechanism (replacing `_route()`) is a
+follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/state_machine.py` (new) — `SDLCState` (15), `Gate` (G1–G4),
+  `GATE_INFO`/`GATE_APPROVAL_FIELD`, `StateDefinition`, `STATE_MACHINE`,
+  `TRANSITION_GATES`, introspection helpers (`all_states`, `forward_path`,
+  `gate_for_transition`, …) and `derive_lifecycle_state`. Pure data; zero orchestrator
+  imports so `state.py` can import `SDLCState` cycle-free.
+- `orchestrator/policy_engine.py` (new) — `can_transition`, `advance` (pure, read
+  artifact via getattr).
+- `orchestrator/state.py` — `lifecycle_state: SDLCState = NEW` + `incident_approved`.
+- `api/main.py` — read-only `lifecycle_state` in the run serializer via a guarded
+  `_lifecycle_state()` helper.
+- `scripts/verify_m13_state_machine.py` (new, 6/6) + `Makefile` `verify-m13`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, state-machine
+  architecture section, M13 invariant, badges, timeline, verification matrix
+  (M13 moved roadmap → shipped; only M14 remains roadmap).
+
+**Verification:** all suites green, zero credentials:
+- M0–M12 suites all pass (`verify_agent_core` 11/11 … `verify_m12_compliance` 3/3)
+- `verify_m13_state_machine.py` → **6/6** · `evals/ci_gate.py` → exit 0 (no regression)
+- `import api.main` + `orchestrator.{state,state_machine,policy_engine}` OK.
+
+**Notes / follow-ups:** The live pipeline is unchanged this milestone (lifecycle is
+surfaced, not yet enforced) — making `policy_engine` the live gating path (refactor
+`_route()` / `_execute_pipeline`) is the natural P0.1 companion. Next: **M14 MAF
+Graduation** (not offline-verifiable) or the **P0** production track.
+
+---
+
 ## 2026-06-14 — M12: Compliance Report (M12)
 **Branch:** `feature/m12-compliance` (stacked on `feature/m11-spec-registry`)  ·  **Commit:** pending
 

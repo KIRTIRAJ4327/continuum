@@ -38,8 +38,9 @@
 [![ASSERT Eval Tests](https://img.shields.io/badge/ASSERT_Eval_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Spec Registry Tests](https://img.shields.io/badge/SpecRegistry_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Compliance Tests](https://img.shields.io/badge/Compliance_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M12_Shipped-7C3AED?style=flat-square)]()
-[![Roadmap](https://img.shields.io/badge/Roadmap-M13--M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
+[![State Machine Tests](https://img.shields.io/badge/StateMachine_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_Shipped-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0--P2-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -546,6 +547,36 @@ Proven offline in `scripts/verify_m12_compliance.py` → 3/3 PASS.
 
 ---
 
+## ✅ 15-State SDLC Machine (M13)
+
+The lifecycle is no longer implicit in routing code — it is an explicit,
+policy-governed graph. **Policies, not agents, decide transitions.**
+
+```
+NEW → EPIC_APPROVED → STORIES_READY → ARCH_READY → IMPL_READY → IN_PROGRESS
+    → CODE_COMPLETE → TESTING → TESTS_PASSED → SECURITY_REVIEW → SECURITY_APPROVED
+    → RELEASE_READY → DEPLOYED → IN_PRODUCTION → CLOSED
+
+orchestrator/state_machine.py   declares: 15 states · entry criteria · forward +
+                                return edges · G1–G4 gates · SLAs   (pure data)
+orchestrator/policy_engine.py   enforces: can_transition(artifact, from, to)
+                                          -> (ok, reason)            (pure predicate)
+```
+
+- **Four named human gates** govern exactly their edges — **G1** Business
+  (NEW→EPIC_APPROVED), **G2** Architecture (ARCH_READY→IMPL_READY), **G3** Release
+  (RELEASE_READY→DEPLOYED), **G4** Critical Incident (IN_PRODUCTION→IN_PROGRESS).
+- **Return edges are first-class** — tests fail → `CODE_COMPLETE`, security findings
+  → `IN_PROGRESS`, prod incident → `IN_PROGRESS` (G4) — no ad-hoc exception paths.
+- **`can_transition()` blocks with a reason** — undeclared edge, missing artifact,
+  ungranted gate, or a quality gate that isn't green.
+- **`lifecycle_state`** is the artifact's system of record; the live pipeline is
+  unchanged and surfaces it read-only via `derive_lifecycle_state()`.
+
+Proven offline in `scripts/verify_m13_state_machine.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -586,10 +617,10 @@ M11 ─── Spec Registry · persistent versioned spec store · supersession c
   │     ✅  GET /specs/{component} · scope-guard extends to Registry · 4/4 PASS
   │
 M12 ─── Compliance Report · structured audit artifact (EU AI Act / OSFI)
-  ┊     ✅  8 sections · reuses Evidence Stack · JSON + HTML · 3/3 PASS
-  ┊
-M13 ┄┄┄ 15-State SDLC Machine · policy engine · G1–G4 named gates
-  ┊     🔜 planned (Frontier) · gated on M11+M12
+  │     ✅  8 sections · reuses Evidence Stack · JSON + HTML · 3/3 PASS
+  │
+M13 ─── 15-State SDLC Machine · policy engine · G1–G4 named gates
+  ┊     ✅  can_transition() governs · return edges · lifecycle_state · 6/6 PASS
   ┊
 M14 ┄┄┄ MAF Harness Graduation · all agents on MAF · Hyperlight sandbox
         🔜 planned (Frontier) · gated on M13 · not offline-verifiable
@@ -615,7 +646,7 @@ and auth/tenancy are prerequisites, with the feature milestones interleaved afte
 |---|---|---|---|
 | **M11** Spec Registry *(Spine)* ✅ **shipped** | Persistent, versioned spec store; BSA conforms-to-or-supersedes the current spec per component | `graph_db/spec_registry.py`, `skills/{query,write}_spec_registry`, `GET /specs/{component}` | M7 scope-guard |
 | **M12** Compliance Report *(Spine)* ✅ **shipped** | `GET /runs/{id}/compliance-report` (JSON + HTML) packaging spec + gate decisions + evidence + audit trail (EU AI Act / OSFI) | `api/compliance.py` | M11 |
-| **M13** 15-State Machine *(Frontier)* | First-class `SDLCStateMachine` + `policy_engine.can_transition()`; G1–G4 named gates; `lifecycle_state` on the artifact | `orchestrator/state_machine.py`, `orchestrator/policy_engine.py` | M11+M12 |
+| **M13** 15-State Machine *(Frontier)* ✅ **shipped** | First-class state machine + `policy_engine.can_transition()`; G1–G4 named gates; `lifecycle_state` on the artifact | `orchestrator/state_machine.py`, `orchestrator/policy_engine.py` | M11+M12 |
 | **M14** MAF Graduation *(Frontier)* | All agents on MAF harness primitives; Hyperlight CodeAct sandbox; Agent Optimizer feeding `human_promote()` | — (graduates M9 pilot) | M13 · **not offline-verifiable** |
 
 ### Production-readiness track (P0–P2)
@@ -723,6 +754,7 @@ make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 make verify-m11       # spec registry (versioned store · supersession · conformance)
 make verify-m12       # compliance report (8-section audit artifact · JSON + HTML)
+make verify-m13       # 15-state machine (policy engine · G1–G4 gates · return edges)
 ```
 
 | Script | Checks | Result |
@@ -739,18 +771,18 @@ make verify-m12       # compliance report (8-section audit artifact · JSON + HT
 | `scripts/verify_m10_assert.py` | rule coverage · spec discrimination · 3-valued scope · OTel no-op | 6/6 ✅ |
 | `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 ✅ |
 | `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid 8-section report | 3/3 ✅ |
+| `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · missing-artifact block · G1–G4 gates · return edges | 6/6 ✅ |
 
-> All 12 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 13 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
-**Planned (M13–M14) — not yet implemented:**
+**Planned (M14) — not yet implemented:**
 
 | Script (planned) | Intended checks | Target |
 |--------|--------|--------|
-| `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · G1–G4 gates | 6/6 |
 | M14 MAF graduation | latency + token cost vs. M9 baseline (**not offline-verifiable**) | measured |
 
-> These are roadmap targets, **not passing checks** — the scripts do not exist yet.
-> Today's offline suite is the 12 rows above.
+> This is a roadmap target, **not a passing check** — and M14 is not offline-verifiable
+> (it needs `agent_framework` + Hyperlight). Today's offline suite is the 13 rows above.
 
 ---
 
