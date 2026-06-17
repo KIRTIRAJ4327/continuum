@@ -92,6 +92,8 @@ def serialize_state(state: Any) -> Dict[str, Any]:
         "spec_superseded": getattr(state, "spec_superseded", None),
         "lifecycle_state": _ev(getattr(state, "lifecycle_state", "new")),
         "incident_approved": getattr(state, "incident_approved", False),
+        "tenant_id": getattr(state, "tenant_id", "default"),
+        "gate_approvals": getattr(state, "gate_approvals", {}) or {},
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -156,6 +158,8 @@ def deserialize_state(data: Dict[str, Any]) -> Any:
         spec_superseded=data.get("spec_superseded"),
         lifecycle_state=_sdlc(data.get("lifecycle_state")),
         incident_approved=data.get("incident_approved", False),
+        tenant_id=data.get("tenant_id", "default"),
+        gate_approvals=data.get("gate_approvals") or {},
         started_at=data.get("started_at"),
         completed_at=data.get("completed_at"),
     )
