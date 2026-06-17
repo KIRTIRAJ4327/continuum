@@ -131,6 +131,17 @@ class ContinuumState:
     # G4 (Critical Incident Approval) grant — return edge IN_PRODUCTION → IN_PROGRESS.
     incident_approved: bool = False
 
+    # P0.3: Auth + tenancy.
+    # The tenant this run belongs to. "default" on every offline / single-tenant
+    # path, so M0–M13 runs are byte-unchanged; set from the caller's Principal
+    # when auth is configured.
+    tenant_id: str = "default"
+    # Captured gate approvals keyed by gate name (story_review/design_review/
+    # merge_review/local_verify/...). Each value: {approved, approver, approver_email,
+    # decided_at}. Empty until an authenticated principal acts on a gate — this is
+    # what lets the M12 compliance report show *who* approved (resolves its P0.3 null).
+    gate_approvals: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # Metadata
     run_id: Optional[str] = None
     started_at: Optional[float] = None

@@ -25,6 +25,7 @@ python scripts/verify_m11_spec_registry.py # must print 4/4
 python scripts/verify_m12_compliance.py     # must print 3/3
 python scripts/verify_m13_state_machine.py  # must print 6/6
 python scripts/verify_p0_durable_execution.py  # must print 4/4
+python scripts/verify_p0_3_auth.py             # must print 6/6
 python scripts/verify_p1_gate_independence.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
@@ -271,6 +272,37 @@ the API surfaces a read-only `lifecycle_state` via `derive_lifecycle_state(artif
 G1/G2/G3 (`GATE_APPROVAL_FIELD`). Wiring the policy engine as the live *gating*
 mechanism (replacing `_route()`) is a follow-up tied to P0.1.
 
+### Auth + Tenancy (`auth/`, P0.3)
+
+Identity, RBAC, and multi-tenant isolation — the gate for real-client use. `auth/`
+is a **leaf package** (imports nothing from `orchestrator`/`api`/`graph_db`), three
+modules: `identity.py` (`Principal` + `resolve_principal(token)`), `rbac.py`
+(`Role` {DEV, REVIEWER, ADMIN} + `Permission` + `ROLE_PERMISSIONS` matrix +
+`can()`/`require()`), `tenancy.py` (`tenant_key()` + `visible_runs()` +
+`can_access_tenant()`).
+
+**Offline-safe by construction:** when auth is **not** configured (`CONTINUUM_AUTH`
+unset/false), `resolve_principal(None)` returns the module-level `DEV_PRINCIPAL` — an
+ADMIN in the `default` tenant — so the verify suite, the header-less UI, and every
+offline path are **byte-unchanged**. Enforcement only bites once `CONTINUUM_AUTH` is
+truthy. Tokens offline use a dev format `cc.<base64url(json)>` (`encode_dev_token`);
+real JWT / Azure AD (Entra ID) validation plugs in behind the same `resolve_principal`
+seam and is the **live-only follow-up** — nothing else changes.
+
+`tenant_key(tenant_id, base)` returns the **bare key** for the `default` tenant (so
+M11 Spec Registry component keys and all offline keys are unchanged) and
+`"<tenant>:<base>"` otherwise. `ContinuumState` gains `tenant_id` (default `"default"`)
+and `gate_approvals` (gate → `{approved, approver, approver_email, decided_at}`). The
+API resolves a `Principal` per request (`current_principal` dependency), `require()`s
+the right `Permission` on each route (SUBMIT_RUN to `POST /run`, APPROVE_GATE/REJECT_GATE
+on resume/reject/escalate, VIEW_RUN on reads, VIEW_COMPLIANCE on the compliance report),
+stamps `state.tenant_id`, scopes `GET /runs` via `visible_runs`, guards single-run access
+by tenant, and records *who* decided each gate via `_record_approval`. `AuthError`→401,
+`PermissionDenied`→403. **M12 closure:** `_section_gate_decisions` now reads
+`state.gate_approvals` and shows the real approver identity; an unrecorded gate keeps
+the explicit `null` + `_missing_reason` (so pre-auth / offline reports are unchanged).
+`GET /me` returns the resolved principal.
+
 ## Roadmap (M14) — not yet implemented
 
 The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11, M12 and M13 are shipped (see
@@ -305,9 +337,17 @@ the verify suite still holds throughout.
 - **P0.2 Sandbox hardening** — `sandbox/` must provision a real ACA/Hyper-V session
   with lifecycle + timeout + egress + credential isolation; **no local-exec fallback
   in production** (offline stub stays for the verify suite only).
-- **P0.3 Auth + tenancy** ("M-Auth", ideally before M11) — identity on every run and
-  gate approval, RBAC (dev/reviewer/admin), per-tenant Neo4j subgraph / audit trail /
-  spec registry. This is the gate for any real-client use.
+- **P0.3 Auth + tenancy** ("M-Auth") — ✅ **shipped (core)** (see the Auth + Tenancy
+  architecture section and the Key Invariants below): `auth/` leaf package — identity
+  (`Principal` + `resolve_principal`), RBAC (DEV/REVIEWER/ADMIN + `can`/`require`), and
+  tenancy (`tenant_key`/`visible_runs`/`can_access_tenant`). Every API route resolves a
+  `Principal`, `require()`s a `Permission`, stamps `state.tenant_id`, and records *who*
+  decided each gate (`state.gate_approvals`) — which closes M12's approver-identity null.
+  Offline-safe: `CONTINUUM_AUTH` unset → ADMIN `DEV_PRINCIPAL`, default tenant, byte-unchanged.
+  `verify_p0_3_auth.py` 6/6. **Live follow-ups:** real JWT / Azure AD (Entra ID) token
+  validation behind `resolve_principal`; per-tenant **Neo4j subgraph** isolation in the
+  live driver (the offline `tenant_key` keying is in place; the live Neo4j label/subgraph
+  partitioning is not yet wired).
 - **P1.1 Gate independence** — ✅ **shipped** (see the Gate system section above):
   `gate_lint` / `gate_typecheck` / `gate_test` are separate gates with separate
   evidence records; the Evidence Stack's layers 1 & 2 now read different signals
@@ -352,6 +392,8 @@ the verify suite still holds throughout.
 | `CONTINUUM_TARGET_REPO` | Target app repo path; M8 writes `.pdlc/` artifacts there |
 | `CONTINUUM_MAF_AGENTS` | Comma-separated roles to run on the M9 MAF pilot (e.g. `backend`); default unset → off |
 | `CONTINUUM_OTEL` | When truthy AND `opentelemetry-api` is importable, the event bus mirrors events onto OTel spans (M10); default unset → off (no-op) |
+| `CONTINUUM_AUTH` | When truthy (`1`/`true`/`yes`/`on`), the API enforces identity + RBAC (P0.3); default unset → off (every caller is the ADMIN `DEV_PRINCIPAL`, byte-unchanged) |
+| `POSTGRES_DSN` | When set, `RunStore` persists runs to Postgres for durable execution (P0.1); default unset → in-memory only |
 
 If none of the Azure vars are set, the pipeline runs fully offline — all verify checks pass.
 
@@ -380,4 +422,16 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
   — the offline-safe invariant holds through transient outages, not just zero-credential
   environments. `ContinuumGraph._run_agent()` creates a per-run `AgentContext`
   (concurrent-run-safe, correct `run_id` for event emission). `verify_p0_durable_execution.py` 4/4.
+- **Auth is offline-safe + leaf-only (P0.3)** — `auth/` imports nothing from
+  `orchestrator`/`api`/`graph_db` (no cycles). `resolve_principal(None)` returns the ADMIN
+  `DEV_PRINCIPAL` in the `default` tenant whenever `CONTINUUM_AUTH` is unset, so the verify
+  suite and the header-less UI are byte-unchanged; `require()`/`can()` only deny once auth is
+  configured. `tenant_key()` returns the bare key for the `default` tenant (M11 component
+  keys unchanged), prefixing only for real tenants. Endpoint route functions take
+  `principal: Principal = Depends(current_principal)`, so direct (non-HTTP) callers in
+  verifiers must pass `principal=DEV_PRINCIPAL` explicitly (as `verify_m6` does for
+  `reject_run`). `_record_approval` populates `state.gate_approvals`, which M12 reads for
+  approver identity — an unrecorded gate keeps the explicit `null` + `_missing_reason`.
+  Real JWT/Azure AD validation and live per-tenant Neo4j subgraph isolation are live-only
+  follow-ups behind the same seams. `verify_p0_3_auth.py` 6/6.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
