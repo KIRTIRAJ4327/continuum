@@ -22,6 +22,10 @@ python scripts/verify_m8_repo_split.py  # must print 3/3
 python scripts/verify_m9_maf_pilot.py   # must print 6/6
 python scripts/verify_m10_assert.py     # must print 6/6
 python scripts/verify_m11_spec_registry.py # must print 4/4
+python scripts/verify_m12_compliance.py     # must print 3/3
+python scripts/verify_m13_state_machine.py  # must print 6/6
+python scripts/verify_p0_durable_execution.py  # must print 4/4
+python scripts/verify_p1_gate_independence.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 
@@ -53,6 +57,9 @@ make verify-m8        # 3/3 Two-Layer Repo Split
 make verify-m9        # 6/6 MAF Harness Pilot
 make verify-m10       # 6/6 ASSERT / Rubric Eval Integration
 make verify-m11       # 4/4 Spec Registry
+make verify-m12       # 3/3 Compliance Report
+make verify-m13       # 6/6 15-State SDLC Machine
+make verify-p1        # 6/6 Gate Independence (lint/typecheck/test)
 
 # Tests, lint, types
 pytest -q
@@ -140,7 +147,17 @@ Skills live at `skills/<name>/v1.0/skill.py`, loaded via `importlib.util.spec_fr
 
 ### Gate system (`orchestrator/gates.py`)
 
-`gate_local_verify` runs ruff → mypy → pytest in order, falling back to `py_compile` per `.py` file when tools aren't installed. TypeScript files are excluded. A gate failure sets `gate.status = "red"` and populates `gate.error_message`.
+**P1.1 (gate independence):** local verification is three INDEPENDENT gates —
+`gate_lint` (ruff), `gate_typecheck` (mypy), `gate_test` (pytest) — each degrading
+to `py_compile` on a thin environment. `gate_local_verify_split()` runs each once
+and returns `{"lint","typecheck","test"}`; `gate_local_verify()` aggregates them
+(green iff all pass) as the backward-compatible composite the live retry loop keys
+on. The DEVELOPER path records all three as their own `GateStatus` **plus** the
+composite `local_verify`, so the Evidence Stack reads layer 1 (build = lint+typecheck)
+and layer 2 (regression = test) from *different* signals (resolves OQ-3); when only
+`local_verify` exists (pre-P1.1 states) both layers fall back to it. A gate failure
+sets `gate.status = "red"` and populates `gate.error_message`. TypeScript files are
+excluded. (Per-gate retry *budgets* in the live loop remain a follow-up tied to P0.1.)
 
 ### Episodic memory (`graph_db/driver.py`, M3)
 
@@ -213,22 +230,54 @@ chain. `specs_match()` (stable keys: `api_endpoints`, `data_entities`,
 `out_of_scope`) is the single source of truth for conformance, shared by the write
 skill and the gate.
 
-## Roadmap (M12–M14) — not yet implemented
+### Compliance Report (`api/compliance.py`, M12)
 
-The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11 is shipped (see the Spec
-Registry architecture section above). These are **planned** — no code exists yet, so
-do **not** add their verify scripts to the non-negotiable list until they exist and
-pass. Guard-rails for the implementing session (one milestone per feature branch →
-PR to `dev`, per PRD §12):
+`build_compliance_report(run_id, state, events=None)` assembles an auditor-readable
+artifact for a run — **packaging, not new capability**. Eight sections, always
+present and in `SECTION_ORDER`: `run_metadata`, `spec` (prefers the M11 Registry,
+falls back to work-item state), `business_mappings` (+ scope-guard conformance),
+`gate_decisions` (human G1/G2 + automated gates), `evidence_stack` (reuses
+`build_evidence_stack`), `audit_trail` (event-bus history, injectable), `versions`
+(`git describe` + model mode/tiers), and `compliance_assertions` (a boolean checklist
++ `passed`). When data is absent it is an explicit `null`/`[]` **with a
+`_missing_reason`**, enumerated in the top-level `missing` list — never silently
+omitted (`complete == (missing == [])`). Pure/offline: the audit trail reads the
+in-memory event bus when not injected; `config`/`git` are best-effort lazy lookups.
+`GET /runs/{run_id}/compliance-report` (JSON) and `…/compliance-report.html`
+(`render_compliance_html`). Approver identity/timestamps are explicit nulls until
+auth lands (P0.3).
 
-- **M12 Compliance Report** (Spine) — `api/compliance.py` `build_compliance_report(run_id, state)`
-  reusing `build_evidence_stack`; `GET /runs/{run_id}/compliance-report`. Packaging,
-  not new capability. Target: `verify_m12_compliance.py` 3/3.
-- **M13 15-State Machine** (Frontier, gated on M11+M12) — `orchestrator/state_machine.py`
-  + `orchestrator/policy_engine.py` `can_transition(artifact, from_state, to_state) -> (bool, reason)`;
-  `lifecycle_state` becomes the artifact's system of record; G1–G4 named gates. This
-  is the reconciliation of the PRD's aspirational "9 stages" — it does not exist today.
-  Target: `verify_m13_state_machine.py` 6/6.
+### 15-State SDLC Machine (`orchestrator/state_machine.py` + `policy_engine.py`, M13)
+
+The lifecycle is an explicit, policy-governed graph. `state_machine.py` *declares*
+it (pure data, zero orchestrator imports so `state.py` can import `SDLCState`
+cycle-free): the 15 `SDLCState`s (`NEW → … → CLOSED`), a `StateDefinition` per state
+(entry `required_artifacts` + `quality_gates`, allowed `forward` + `returns` edges,
+SLA), and `TRANSITION_GATES` mapping the four named human gates to the exact edges
+they govern — **G1** NEW→EPIC_APPROVED, **G2** ARCH_READY→IMPL_READY, **G3**
+RELEASE_READY→DEPLOYED, **G4** IN_PRODUCTION→IN_PROGRESS (incident return). Return
+edges (tests-fail, security findings, prod incident) are first-class.
+
+`policy_engine.py` *enforces* it: `can_transition(artifact, from_state, to_state)
+-> (ok, reason)` is a pure predicate checking, in order, edge-exists → human gate
+granted → required artifacts present → quality gates green. `advance(artifact,
+to_state)` mutates `artifact.lifecycle_state` only when the policy permits. Both read
+the artifact (a `ContinuumState`) via `getattr`, so they never import `state.py`.
+
+`ContinuumState.lifecycle_state` (default `SDLCState.NEW`) is the artifact's record;
+`incident_approved` grants G4. The live `_execute_pipeline()` path is **unchanged** —
+the API surfaces a read-only `lifecycle_state` via `derive_lifecycle_state(artifact)`
+(best-effort, never raises), and the existing `story/design/merge` approvals map to
+G1/G2/G3 (`GATE_APPROVAL_FIELD`). Wiring the policy engine as the live *gating*
+mechanism (replacing `_route()`) is a follow-up tied to P0.1.
+
+## Roadmap (M14) — not yet implemented
+
+The active spec is **`Continuum-PRD-v3.0.md`** (§8). M11, M12 and M13 are shipped (see
+the architecture sections above). M14 is **planned** — no code exists yet, so do
+**not** add its verify script to the non-negotiable list until it exists. Guard-rails
+(one milestone per feature branch → PR to `dev`, per PRD §12):
+
 - **M14 MAF Graduation** (Frontier, gated on M13) — graduates the M9 pilot; **not
   offline-verifiable** (needs `agent_framework` + Hyperlight). Keep the
   dormant-unless-opted-in convention; never claim a passing offline badge.
@@ -246,20 +295,24 @@ Sequenced P0→P2, and **P0 comes before the M11–M14 feature milestones**. Lar
 operational and partly not offline-verifiable — but the offline-safe invariant for
 the verify suite still holds throughout.
 
-- **P0.1 Durable execution** — wire `graph.py` / `ContinuumGraph` + the Postgres
-  LangGraph checkpointer as the *actual* live path and retire the in-memory `_RUNS`
-  dict, so runs survive a process restart and resume from the last checkpoint.
-  Highest-leverage, almost entirely internal — recommended next.
+- **P0.1 Durable execution** — ✅ **shipped** (see the Key Invariants section below):
+  `graph_db/run_store.py` `RunStore` — Postgres-backed when `POSTGRES_DSN` is set,
+  in-memory dict otherwise. `_RUNS` in `api/main.py` is now an alias of the store's
+  `_MEMORY` dict (same object, no behaviour change for the offline verify suite). On
+  startup, active runs are restored from Postgres (`restore_active()`). Checkpoints are
+  written at every human-gate suspension and at pipeline completion. The
+  `ContinuumGraph._run_agent()` per-run-context bug is also fixed. `verify_p0_durable_execution.py` 4/4.
 - **P0.2 Sandbox hardening** — `sandbox/` must provision a real ACA/Hyper-V session
   with lifecycle + timeout + egress + credential isolation; **no local-exec fallback
   in production** (offline stub stays for the verify suite only).
 - **P0.3 Auth + tenancy** ("M-Auth", ideally before M11) — identity on every run and
   gate approval, RBAC (dev/reviewer/admin), per-tenant Neo4j subgraph / audit trail /
   spec registry. This is the gate for any real-client use.
-- **P1.1 Gate independence** — split `gate_local_verify` into `gate_lint` /
-  `gate_typecheck` / `gate_test`, each with its own pass/fail + retry budget +
-  evidence record. Makes the Evidence Stack's "6 independent signals" literally true
-  (resolves OQ-3) and makes M12's compliance claims defensible.
+- **P1.1 Gate independence** — ✅ **shipped** (see the Gate system section above):
+  `gate_lint` / `gate_typecheck` / `gate_test` are separate gates with separate
+  evidence records; the Evidence Stack's layers 1 & 2 now read different signals
+  (resolves OQ-3) and M12's compliance claims are defensible. Per-gate retry
+  *budgets* in the live loop remain a follow-up tied to P0.1.
 - **P1.2 Observability** — OTel (M10 hook) exported to App Insights / Langfuse: real
   traces, real cost (not the offline `$0.02` stub), per-stage latency, stuck-run alerts.
 
@@ -315,4 +368,16 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **ASSERT rubric is deterministic + offline (M10)** — `evals/assert_specs.py` specs are pure predicates over state/harness; `judge.score()` never needs credentials. The optional Azure 1–5 rating is a secondary `llm_rating` calibration signal, never the score. A buggy spec is caught and converted to a deterministic `fail` (`_safe_check`), so it can't crash the eval.
 - **OTel export is dormant unless opted in (M10)** — `event_bus.emit()` mirrors events onto OTel spans only when `CONTINUUM_OTEL` is truthy AND `opentelemetry` imports; otherwise `_otel_emit()` is a no-op. Any OTel error is swallowed — telemetry can never break a run, and the offline path never imports OTel.
 - **Spec Registry is append-only + offline-safe (M11)** — `graph_db/spec_registry.py` never edits a spec in place; a materially different spec creates a new version that SUPERSEDES the prior. The module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with no Neo4j; the live Neo4j path runs only when a *connected* driver is passed (`_is_live()`) and any error falls back to the store. The M11 scope-guard branch only fires when `state.registry_current_before` is set, so M0–M10 runs are byte-unchanged. `specs_match()` is the single conformance predicate shared by the write skill and the gate.
+- **Compliance Report is total + honest (M12)** — `build_compliance_report()` always returns all 8 sections; absent data is an explicit `null`/`[]` with a `_missing_reason` and is listed in `missing` (never silently dropped). It is pure/offline (event-bus audit trail, lazy `config`/`git`), reuses `build_evidence_stack`, and never asserts more than the run actually proved — a blocked/returned run yields a valid report whose `compliance_assertions.passed` is honestly `False`.
+- **State machine governs, offline-safe (M13)** — `policy_engine.can_transition()` is a pure predicate over the artifact and the declared `state_machine.py` graph (edge → gate → artifacts → quality gates); `state_machine.py` imports nothing from the orchestrator so `state.py` can import `SDLCState` cycle-free. The live `_execute_pipeline()` path is unchanged — `lifecycle_state` is surfaced read-only via `derive_lifecycle_state()` (best-effort, never raises). M0–M12 runs are byte-unchanged.
+- **Gates are independent (P1.1)** — `gate_lint`/`gate_typecheck`/`gate_test` are separate gates with separate `GateStatus` records; `gate_local_verify` is the backward-compatible aggregate the live retry loop and the M0 verifier key on (M0 patches `gate_local_verify_split`, the single-run source of truth). The Evidence Stack reads layers 1 & 2 from different signals when the split gates exist, else falls back to `local_verify` — so pre-P1.1 states are byte-unchanged. Each gate keeps its `py_compile` offline fallback.
+- **Run store is durable + offline-safe (P0.1)** — `graph_db/run_store.py` `RunStore`
+  writes a checkpoint to Postgres (asyncpg) at every human-gate suspension and at
+  pipeline completion. `_RUNS` in `api/main.py` is the module-level `_MEMORY` dict from
+  `run_store` — same object, no copy, no behaviour change for the offline verify suite.
+  On startup (`restore_active()`) non-terminal runs are reloaded from Postgres so they
+  survive a process restart. Any Postgres failure degrades silently to the in-memory tier
+  — the offline-safe invariant holds through transient outages, not just zero-credential
+  environments. `ContinuumGraph._run_agent()` creates a per-run `AgentContext`
+  (concurrent-run-safe, correct `run_id` for event emission). `verify_p0_durable_execution.py` 4/4.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.

@@ -16,6 +16,165 @@ Entry format:
 
 ---
 
+## 2026-06-17 — P0.1: Durable Execution — run persistence layer (P0.1)
+**Branch:** `feature/p0-durable-execution`  ·  **Commit:** pending
+**What:** Adds `graph_db/run_store.py` `RunStore` — a two-tier persistence layer for
+`ContinuumState`. Tier 1 (live): asyncpg-based Postgres upserts after every human-gate
+suspension and at pipeline completion, so runs survive a process restart. Tier 2
+(offline default): the module-level `_MEMORY` dict, which `api/main._RUNS` is now an
+alias of — same object, no copy, no behaviour change for the verify suite. On startup,
+`restore_active()` reloads non-terminal runs from Postgres. Any Postgres error degrades
+silently to in-memory. Also fixes `ContinuumGraph._run_agent()` to create a per-run
+`AgentContext` (was using a shared context, unsafe for concurrent runs).
+**Files:** `graph_db/run_store.py` (new), `api/main.py` (RunStore wiring), `orchestrator/graph.py` (per-run context fix), `scripts/verify_p0_durable_execution.py` (new), `Makefile`, `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core: 11/11 ✅
+- verify_m0_loop: 3/3 ✅ (unchanged — _execute_pipeline and _RUNS behaviour identical)
+- verify_m11_spec_registry: 4/4 ✅ · verify_m12_compliance: 3/3 ✅
+- verify_m13_state_machine: 6/6 ✅ · verify_p1_gate_independence: 6/6 ✅
+- **verify_p0_durable_execution: 4/4 ✅**
+- evals/ci_gate.py: exit 0 ✅
+**Notes:** Execution path switch (use `ContinuumGraph.run()` instead of `_execute_pipeline`) is the P0.1 follow-up — requires LangGraph checkpointer suspend/resume and resolves the mid-run state gap. `POSTGRES_DSN` env var activates the Postgres tier.
+
+## 2026-06-14 — P1.1: Gate Independence (resolves OQ-3) (P1.1)
+**Branch:** `feature/p1-gate-independence` (stacked on `feature/m13-state-machine`)  ·  **Commit:** pending
+
+**What:** Implemented P1.1 from the production-readiness track — splitting the
+combined `local_verify` gate into three INDEPENDENT gates (`gate_lint`,
+`gate_typecheck`, `gate_test`), each with its own pass/fail and its own evidence
+record. This makes the Evidence Stack's "6 independent signals" literally true
+(**resolves OQ-3**) and makes M12's compliance claims defensible. Single-run design:
+`gate_local_verify_split()` runs each gate once and is the source of truth; the
+DEVELOPER path records all three `GateStatus`es plus a derived composite
+`local_verify` (so the live retry loop, graph routing, and M13 quality gate — all of
+which key on `local_verify` — are unchanged). The Evidence Stack now reads layer 1
+(build = lint+typecheck) and layer 2 (regression = test) from *different* signals
+when the split gates exist, falling back to `local_verify` for pre-P1.1 states
+(byte-unchanged). Each gate keeps its `py_compile` offline fallback. Per-gate retry
+*budgets* in the live loop remain a follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/gates.py` — new `gate_lint` / `gate_typecheck` / `gate_test` /
+  `gate_local_verify_split`; `gate_local_verify` refactored to the composite
+  aggregate; `_pycompile` helper. `_python_targets` unchanged.
+- `orchestrator/agent_runner.py` — DEVELOPER branch runs the split once, records the
+  three sub-gates + the composite (single tool run, no double-execution).
+- `evals/evidence_stack.py` — layers 1 & 2 read independent gates when present
+  (`_combine_status` / `_combine_detail`), else fall back to `local_verify`; sublabels
+  updated; 6-layer shape and keys unchanged.
+- `scripts/verify_m0_loop.py` — patches `gate_local_verify_split` (the new source of
+  truth) instead of the composite; same retry/escalation behaviour, still 3/3.
+- `scripts/verify_p1_gate_independence.py` (new, 6/6) + `Makefile` `verify-p1`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Gate-system section
+  rewrite, P1.1 invariant, OQ-3 marked resolved, badges, verification matrix,
+  production-readiness P1.1 → shipped.
+
+**Verification:** all suites green, zero credentials:
+- M0–M13 suites all pass (notably `verify_m0_loop` 3/3 after the patch-target change,
+  `verify_m6_workqueue` 6/6, `verify_m10_assert` 6/6 — Evidence Stack shape intact)
+- `verify_p1_gate_independence.py` → **6/6** · `evals/ci_gate.py` → exit 0 · `import api.main` OK.
+
+**Notes / follow-ups:** This is the offline-verifiable slice of P1. The remaining P0
+work (durable execution, sandbox, auth/tenancy) and P1.2 observability touch the live
+path / external services and are not offline-verifiable. Recommended next: **P0.3
+auth/tenancy** (the gate for real-client use) or **P0.1 durable execution** (which is
+also where the M13 policy engine becomes the live gating mechanism).
+
+---
+
+## 2026-06-14 — M13: 15-State SDLC Machine + Policy Engine (M13)
+**Branch:** `feature/m13-state-machine` (stacked on `feature/m12-compliance`)  ·  **Commit:** pending
+
+**What:** Implemented M13 from `Continuum-PRD-v3.0.md` §8 — the first Frontier
+milestone (unblocked now M11+M12 shipped). The SDLC lifecycle is now an explicit,
+policy-governed graph instead of being implicit in routing code. `state_machine.py`
+**declares** the 15 states (`NEW → … → CLOSED`), each with entry criteria
+(`required_artifacts` + `quality_gates`), allowed `forward`/`returns` edges, and the
+four named human gates (`TRANSITION_GATES`: G1 NEW→EPIC_APPROVED, G2 ARCH_READY→
+IMPL_READY, G3 RELEASE_READY→DEPLOYED, G4 IN_PRODUCTION→IN_PROGRESS incident return).
+`policy_engine.py` **enforces** it: `can_transition(artifact, from, to) -> (ok,
+reason)` is a pure predicate (edge → gate → artifacts → quality gates), and
+`advance()` mutates `lifecycle_state` only when permitted. Return/exception edges
+(tests-fail, security-findings, prod-incident) are first-class. The live
+`_execute_pipeline()` path is **deliberately unchanged** — `lifecycle_state` is the
+new `ContinuumState` field (system of record) and the API surfaces a read-only value
+via `derive_lifecycle_state()`; existing story/design/merge approvals map to G1/G2/G3.
+Wiring the policy engine as the live *gating* mechanism (replacing `_route()`) is a
+follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/state_machine.py` (new) — `SDLCState` (15), `Gate` (G1–G4),
+  `GATE_INFO`/`GATE_APPROVAL_FIELD`, `StateDefinition`, `STATE_MACHINE`,
+  `TRANSITION_GATES`, introspection helpers (`all_states`, `forward_path`,
+  `gate_for_transition`, …) and `derive_lifecycle_state`. Pure data; zero orchestrator
+  imports so `state.py` can import `SDLCState` cycle-free.
+- `orchestrator/policy_engine.py` (new) — `can_transition`, `advance` (pure, read
+  artifact via getattr).
+- `orchestrator/state.py` — `lifecycle_state: SDLCState = NEW` + `incident_approved`.
+- `api/main.py` — read-only `lifecycle_state` in the run serializer via a guarded
+  `_lifecycle_state()` helper.
+- `scripts/verify_m13_state_machine.py` (new, 6/6) + `Makefile` `verify-m13`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, state-machine
+  architecture section, M13 invariant, badges, timeline, verification matrix
+  (M13 moved roadmap → shipped; only M14 remains roadmap).
+
+**Verification:** all suites green, zero credentials:
+- M0–M12 suites all pass (`verify_agent_core` 11/11 … `verify_m12_compliance` 3/3)
+- `verify_m13_state_machine.py` → **6/6** · `evals/ci_gate.py` → exit 0 (no regression)
+- `import api.main` + `orchestrator.{state,state_machine,policy_engine}` OK.
+
+**Notes / follow-ups:** The live pipeline is unchanged this milestone (lifecycle is
+surfaced, not yet enforced) — making `policy_engine` the live gating path (refactor
+`_route()` / `_execute_pipeline`) is the natural P0.1 companion. Next: **M14 MAF
+Graduation** (not offline-verifiable) or the **P0** production track.
+
+---
+
+## 2026-06-14 — M12: Compliance Report (M12)
+**Branch:** `feature/m12-compliance` (stacked on `feature/m11-spec-registry`)  ·  **Commit:** pending
+
+**What:** Implemented M12 from `Continuum-PRD-v3.0.md` §8 — the second Spine
+milestone, and **packaging, not new capability**. `api/compliance.py`
+`build_compliance_report(run_id, state, events=None)` assembles an auditor-readable
+artifact from data that already exists across the run state and event bus: 8
+always-present sections (run metadata, spec, business mappings, gate decisions,
+the 6-layer Evidence Stack, audit trail, harness/model versions, and a boolean
+compliance-assertions checklist). The `spec` section prefers the M11 Registry and
+falls back to work-item state. Honesty is built in: a blocked/returned run yields a
+*valid* report whose `compliance_assertions.passed` is truthfully `False`, and any
+absent data is an explicit `null`/`[]` carrying a `_missing_reason`, enumerated in
+`report["missing"]` — never silently omitted (`complete == missing == []`). Two
+endpoints: `GET /runs/{run_id}/compliance-report` (JSON) and `…/compliance-report.html`
+(`render_compliance_html`). Pure/offline: audit trail from the in-memory event bus,
+`git describe` + `config` are best-effort lazy lookups; reuses `build_evidence_stack`.
+
+**Files:**
+- `api/compliance.py` (new) — `build_compliance_report`, `render_compliance_html`,
+  `SECTION_ORDER`, the eight `_section_*` builders, `_collect_missing`, and
+  best-effort `_harness_version` / `_model_config` helpers.
+- `api/main.py` — `GET /runs/{run_id}/compliance-report` (+ `.html`); import +
+  `HTMLResponse`.
+- `scripts/verify_m12_compliance.py` (new, 3/3) + `Makefile` `verify-m12` target.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Compliance Report
+  architecture section, M12 invariant, badges, timeline, verification matrix
+  (M12 moved roadmap → shipped).
+
+**Verification:** all suites green, zero credentials:
+- `verify_agent_core.py` (11/11) · `verify_m0_loop.py` (3/3) · `verify_m3_learning.py` (6/6)
+- `verify_m5_evolution.py` · `verify_m6_workqueue.py` · `verify_m7_scope_guard.py` (2/2)
+- `verify_m8_repo_split.py` (3/3) · `verify_m9_maf_pilot.py` (6/6) · `verify_m10_assert.py` (6/6)
+- `verify_m11_spec_registry.py` (4/4) · `verify_m12_compliance.py` → **3/3**
+- `evals/ci_gate.py` → exit 0 (no regression) · `import api.main` OK.
+
+**Notes / follow-ups:** Approver identity + approval timestamps are explicit nulls
+with a reason (`pending auth, P0.3`) — they become real once auth lands. The audit
+trail reads the in-memory event bus; the durable-Postgres source is a P-track
+concern. Branch is stacked on M11 (PR #16) — merge M11 first, then this PR shows a
+clean M12-only diff. Next: **M13 15-State Machine** (Frontier, gated on M11+M12,
+now both shipped) or the **P0** production track.
+
+---
+
 ## 2026-06-14 — M11: Spec Registry (M11)
 **Branch:** `feature/m11-spec-registry`  ·  **Commit:** pending
 

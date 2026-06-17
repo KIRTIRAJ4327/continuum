@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-p0 verify-p1 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -21,6 +21,10 @@ help:
 	@echo "  make verify-m9      — Run M9 MAF Harness Pilot demo (6/6)"
 	@echo "  make verify-m10     — Run M10 ASSERT / Rubric Eval demo (6/6)"
 	@echo "  make verify-m11     — Run M11 Spec Registry demo (4/4)"
+	@echo "  make verify-m12     — Run M12 Compliance Report demo (3/3)"
+	@echo "  make verify-m13     — Run M13 15-State Machine demo (6/6)"
+	@echo "  make verify-p0      — Run P0.1 Durable Execution demo (4/4)
+  make verify-p1      — Run P1.1 Gate Independence demo (6/6)"
 	@echo "  make evo-observe    — Print current failure patterns from event history"
 	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
 	@echo "  make evo-promote    — List pending proposals; apply by ID"
@@ -113,6 +117,22 @@ verify-m10:
 verify-m11:
 	@echo "Running M11 Spec Registry verification (4/4)..."
 	python scripts/verify_m11_spec_registry.py
+
+verify-m12:
+	@echo "Running M12 Compliance Report verification (3/3)..."
+	python scripts/verify_m12_compliance.py
+
+verify-m13:
+	@echo "Running M13 15-State Machine verification (6/6)..."
+	python scripts/verify_m13_state_machine.py
+
+verify-p0:
+	@echo "Running P0.1 Durable Execution verification (4/4)..."
+	python scripts/verify_p0_durable_execution.py
+
+verify-p1:
+	@echo "Running P1.1 Gate Independence verification (6/6)..."
+	python scripts/verify_p1_gate_independence.py
 
 evo-observe:
 	@echo "Current failure patterns from event history:"

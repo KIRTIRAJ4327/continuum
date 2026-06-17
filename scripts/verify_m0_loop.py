@@ -50,13 +50,15 @@ async def case_red_then_green() -> Tuple[str, bool, str]:
     state = ContinuumState(request="Build a flaky feature")
     calls = {"n": 0}
 
-    async def fake_local_verify(_path: str):
+    async def fake_split(_path: str):
+        # P1.1: the developer path now keys on the split (lint/typecheck/test).
         calls["n"] += 1
         if calls["n"] < 3:
-            return False, f"simulated lint failure #{calls['n']}"
-        return True, "ok"
+            return {"lint": (False, f"simulated lint failure #{calls['n']}"),
+                    "typecheck": (True, "ok"), "test": (True, "ok")}
+        return {"lint": (True, "ok"), "typecheck": (True, "ok"), "test": (True, "ok")}
 
-    with patch("orchestrator.gates.gate_local_verify", new=fake_local_verify):
+    with patch("orchestrator.gates.gate_local_verify_split", new=fake_split):
         await _execute_pipeline(state)
 
     lv = _gate(state, "local_verify")
@@ -74,9 +76,10 @@ async def case_persistent_red() -> Tuple[str, bool, str]:
     state = ContinuumState(request="Build a doomed feature")
 
     async def always_fail(_path: str):
-        return False, "simulated permanent failure"
+        return {"lint": (False, "simulated permanent failure"),
+                "typecheck": (True, "ok"), "test": (True, "ok")}
 
-    with patch("orchestrator.gates.gate_local_verify", new=always_fail):
+    with patch("orchestrator.gates.gate_local_verify_split", new=always_fail):
         await _execute_pipeline(state)
 
     lv = _gate(state, "local_verify")
