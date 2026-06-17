@@ -16,6 +16,26 @@ Entry format:
 
 ---
 
+## 2026-06-17 — P0.1: Durable Execution — run persistence layer (P0.1)
+**Branch:** `feature/p0-durable-execution`  ·  **Commit:** pending
+**What:** Adds `graph_db/run_store.py` `RunStore` — a two-tier persistence layer for
+`ContinuumState`. Tier 1 (live): asyncpg-based Postgres upserts after every human-gate
+suspension and at pipeline completion, so runs survive a process restart. Tier 2
+(offline default): the module-level `_MEMORY` dict, which `api/main._RUNS` is now an
+alias of — same object, no copy, no behaviour change for the verify suite. On startup,
+`restore_active()` reloads non-terminal runs from Postgres. Any Postgres error degrades
+silently to in-memory. Also fixes `ContinuumGraph._run_agent()` to create a per-run
+`AgentContext` (was using a shared context, unsafe for concurrent runs).
+**Files:** `graph_db/run_store.py` (new), `api/main.py` (RunStore wiring), `orchestrator/graph.py` (per-run context fix), `scripts/verify_p0_durable_execution.py` (new), `Makefile`, `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core: 11/11 ✅
+- verify_m0_loop: 3/3 ✅ (unchanged — _execute_pipeline and _RUNS behaviour identical)
+- verify_m11_spec_registry: 4/4 ✅ · verify_m12_compliance: 3/3 ✅
+- verify_m13_state_machine: 6/6 ✅ · verify_p1_gate_independence: 6/6 ✅
+- **verify_p0_durable_execution: 4/4 ✅**
+- evals/ci_gate.py: exit 0 ✅
+**Notes:** Execution path switch (use `ContinuumGraph.run()` instead of `_execute_pipeline`) is the P0.1 follow-up — requires LangGraph checkpointer suspend/resume and resolves the mid-run state gap. `POSTGRES_DSN` env var activates the Postgres tier.
+
 ## 2026-06-14 — P1.1: Gate Independence (resolves OQ-3) (P1.1)
 **Branch:** `feature/p1-gate-independence` (stacked on `feature/m13-state-machine`)  ·  **Commit:** pending
 

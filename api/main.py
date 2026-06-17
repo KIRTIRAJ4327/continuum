@@ -34,6 +34,7 @@ from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
 from api.compliance import build_compliance_report, render_compliance_html
 from orchestrator.state_machine import derive_lifecycle_state
+from graph_db.run_store import RunStore, _MEMORY as _RUNS
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,22 @@ app = FastAPI(title="Continuum", version="0.2.0")
 
 
 @app.on_event("startup")
-async def validate_env() -> None:
+async def startup() -> None:
     """
-    Warn about missing optional env vars at startup.
+    Initialise the run store and restore active runs.
 
-    The server ALWAYS starts — even without any credentials — because the
-    offline/stub path handles all cases.  This validator only logs warnings so
-    operators know which integrations are in stub mode.
+    P0.1: creates a RunStore backed by Postgres when POSTGRES_DSN is set; falls
+    back to the in-memory _MEMORY dict otherwise (identical to pre-P0.1 behaviour).
+    On a Postgres restart, active runs are reloaded from the last checkpoint.
+
+    Also validates optional env vars (offline stub mode warnings).
     """
+    global _STORE
+    dsn = os.getenv("POSTGRES_DSN", "").strip()
+    _STORE = await RunStore.create(dsn=dsn or None)
+    if dsn:
+        await _STORE.restore_active()
+
     try:
         from config import warn_missing_optional, AZURE_AI_LIVE, AZURE_ADO_LIVE  # type: ignore
         missing = warn_missing_optional()
@@ -77,8 +86,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory run store. LangGraph PostgresCheckpointer replaces this in production.
-_RUNS: Dict[str, ContinuumState] = {}
+# P0.1: RunStore — Postgres-backed when POSTGRES_DSN is set, in-memory otherwise.
+# _RUNS is the module-level _MEMORY dict from run_store (same object, no copy).
+_STORE: Optional[RunStore] = None
 _MAX_RETRIES = 3
 
 
@@ -277,6 +287,9 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
                 "run_id": run_id,
                 "data": {"gate_name": state.approval_gate_name},
             })
+            # P0.1: checkpoint at every human gate so the run survives a restart
+            if _STORE and run_id:
+                await _STORE.save(run_id, state)
 
     # 1. BSA → Architect → Planner (no retry gates on this stretch in M0)
     for role in ("bsa", "architect", "planner"):
@@ -381,6 +394,10 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
         except Exception as pdlc_exc:  # noqa: BLE001
             logger.warning("M8: emit_pdlc_artifacts failed (non-fatal): %s", pdlc_exc)
 
+    # P0.1: persist final state so runs survive a process restart.
+    if _STORE and run_id:
+        await _STORE.save(run_id, state)
+
     if run_id:
         await event_bus.emit(run_id, {
             "event_type": "run_complete",
@@ -445,6 +462,9 @@ async def list_runs() -> List[Dict[str, Any]]:
 @app.get("/run/{run_id}")
 async def get_run(run_id: str) -> Dict[str, Any]:
     state = _RUNS.get(run_id)
+    if state is None and _STORE is not None:
+        # P0.1: try to load from Postgres (run started in a previous process)
+        state = await _STORE.load(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}

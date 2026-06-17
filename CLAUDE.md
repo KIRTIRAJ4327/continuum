@@ -24,6 +24,7 @@ python scripts/verify_m10_assert.py     # must print 6/6
 python scripts/verify_m11_spec_registry.py # must print 4/4
 python scripts/verify_m12_compliance.py     # must print 3/3
 python scripts/verify_m13_state_machine.py  # must print 6/6
+python scripts/verify_p0_durable_execution.py  # must print 4/4
 python scripts/verify_p1_gate_independence.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
@@ -294,10 +295,13 @@ Sequenced P0→P2, and **P0 comes before the M11–M14 feature milestones**. Lar
 operational and partly not offline-verifiable — but the offline-safe invariant for
 the verify suite still holds throughout.
 
-- **P0.1 Durable execution** — wire `graph.py` / `ContinuumGraph` + the Postgres
-  LangGraph checkpointer as the *actual* live path and retire the in-memory `_RUNS`
-  dict, so runs survive a process restart and resume from the last checkpoint.
-  Highest-leverage, almost entirely internal — recommended next.
+- **P0.1 Durable execution** — ✅ **shipped** (see the Key Invariants section below):
+  `graph_db/run_store.py` `RunStore` — Postgres-backed when `POSTGRES_DSN` is set,
+  in-memory dict otherwise. `_RUNS` in `api/main.py` is now an alias of the store's
+  `_MEMORY` dict (same object, no behaviour change for the offline verify suite). On
+  startup, active runs are restored from Postgres (`restore_active()`). Checkpoints are
+  written at every human-gate suspension and at pipeline completion. The
+  `ContinuumGraph._run_agent()` per-run-context bug is also fixed. `verify_p0_durable_execution.py` 4/4.
 - **P0.2 Sandbox hardening** — `sandbox/` must provision a real ACA/Hyper-V session
   with lifecycle + timeout + egress + credential isolation; **no local-exec fallback
   in production** (offline stub stays for the verify suite only).
@@ -367,4 +371,13 @@ If none of the Azure vars are set, the pipeline runs fully offline — all verif
 - **Compliance Report is total + honest (M12)** — `build_compliance_report()` always returns all 8 sections; absent data is an explicit `null`/`[]` with a `_missing_reason` and is listed in `missing` (never silently dropped). It is pure/offline (event-bus audit trail, lazy `config`/`git`), reuses `build_evidence_stack`, and never asserts more than the run actually proved — a blocked/returned run yields a valid report whose `compliance_assertions.passed` is honestly `False`.
 - **State machine governs, offline-safe (M13)** — `policy_engine.can_transition()` is a pure predicate over the artifact and the declared `state_machine.py` graph (edge → gate → artifacts → quality gates); `state_machine.py` imports nothing from the orchestrator so `state.py` can import `SDLCState` cycle-free. The live `_execute_pipeline()` path is unchanged — `lifecycle_state` is surfaced read-only via `derive_lifecycle_state()` (best-effort, never raises). M0–M12 runs are byte-unchanged.
 - **Gates are independent (P1.1)** — `gate_lint`/`gate_typecheck`/`gate_test` are separate gates with separate `GateStatus` records; `gate_local_verify` is the backward-compatible aggregate the live retry loop and the M0 verifier key on (M0 patches `gate_local_verify_split`, the single-run source of truth). The Evidence Stack reads layers 1 & 2 from different signals when the split gates exist, else falls back to `local_verify` — so pre-P1.1 states are byte-unchanged. Each gate keeps its `py_compile` offline fallback.
+- **Run store is durable + offline-safe (P0.1)** — `graph_db/run_store.py` `RunStore`
+  writes a checkpoint to Postgres (asyncpg) at every human-gate suspension and at
+  pipeline completion. `_RUNS` in `api/main.py` is the module-level `_MEMORY` dict from
+  `run_store` — same object, no copy, no behaviour change for the offline verify suite.
+  On startup (`restore_active()`) non-terminal runs are reloaded from Postgres so they
+  survive a process restart. Any Postgres failure degrades silently to the in-memory tier
+  — the offline-safe invariant holds through transient outages, not just zero-credential
+  environments. `ContinuumGraph._run_agent()` creates a per-run `AgentContext`
+  (concurrent-run-safe, correct `run_id` for event emission). `verify_p0_durable_execution.py` 4/4.
 - **Windows UTF-8** — verify scripts and CI gate wrap `sys.stdout` with `io.TextIOWrapper(..., encoding="utf-8")` at the top to survive Windows cp1252 terminals. Add this to any new script that prints non-ASCII.
