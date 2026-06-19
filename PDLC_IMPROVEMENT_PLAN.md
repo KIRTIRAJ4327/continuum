@@ -32,7 +32,7 @@
 | 10 | **No offline/stub contract.** Your `StubProvider` is actually an asset — keep a deterministic offline path per agent so the POC runs and tests with zero credentials. | §9 — formalize the offline fallback as a first-class agent contract. |
 | 11 | Frontend maps stage→state; **no shared source of truth** for the state enum, so changing the machine silently breaks the UI. | §10 — generate/share the state + event types across BE/FE. |
 
-**Bottom line:** the guide is a sound *destination*. This plan is the *route from where your code actually is* — and it patches three things the guide would otherwise let an AI assistant get wrong (idempotent interrupts, event replay, duplicate routers). Beyond hardening, **§13 adds an architecture track** — six structural moves (durable worker, hexagonal core, policy engine, ports registry, tenancy/auth, optional event-sourcing), four of them already proven in your Continuum build.
+**Bottom line:** the guide is a sound *destination*. This plan is the *route from where your code actually is* — and it patches three things the guide would otherwise let an AI assistant get wrong (idempotent interrupts, event replay, duplicate routers). Beyond hardening, **§13 specs the observability-first cockpit** (the event vocabulary + component tree that makes the backend visible) and **§14 adds an architecture track** — six structural moves (durable worker, hexagonal core, policy engine, ports registry, tenancy/auth, optional event-sourcing), four of them already proven in your Continuum build.
 
 ---
 
@@ -48,7 +48,7 @@
 | Observability | LangSmith *or* Langfuse | **Langfuse** = MIT, first-class self-hosting, framework-agnostic (~infra-only cost self-hosted). **LangSmith** = proprietary, self-host needs Enterprise license, zero-config for LangChain. | ⚠️ default **Langfuse** for this domain |
 | SSE | Native SSE w/ reconnection | FastAPI ≥ 0.135.0 supports `Last-Event-ID` header + built-in keep-alive ping / `Cache-Control: no-cache` / `X-Accel-Buffering: no`. | ✅ keep, add replay (§8) |
 
-Sources are listed in §13.
+Sources are listed in §18.
 
 ---
 
@@ -197,6 +197,7 @@ If the current graph uses `interrupt_before=[...gate nodes...]` at compile time,
 - **Changes (incremental, not a rewrite):** introduce **Tailwind v4 + shadcn/ui** (canary CLI), pin **React 19**; adopt **TanStack Query** for run/list/detail fetching (kill ad-hoc polling races); add a **Live Activity Feed** (LangSmith-style trace rows: agent action / tool call / state change / timing) fed by WS5's replayable SSE; add **workflow visualization** (React Flow graph *or* a timeline) driven by the shared state enum (§10/WS10); subtle Framer Motion on state transitions.
 - **Pitfall:** don't rewrite `Cockpit.tsx` wholesale — wrap/extract components so the working SSE + run-selection logic survives.
 - **Done when:** the cockpit shows live agent activity with drill-down, stage progress, and timing — and still works when the backend restarts (proves WS3+WS5).
+- **Deep-dive:** the event vocabulary the backend must emit **+** the full component tree are specified in **§13 (observability-first cockpit)** — build the events first, then render.
 
 ### WS8 — Gate-decision panel
 - **AI reads:** the gate components in `frontend/src/`, the `…/{id}/gate` GET/POST client calls.
@@ -224,7 +225,71 @@ If the current graph uses `interrupt_before=[...gate nodes...]` at compile time,
 
 ---
 
-## 13. Architecture track — bigger moves (you said "feel free")
+## 13. Observability-first cockpit — the event vocabulary + component tree
+
+WS7/WS8 say "build a great cockpit." This section makes it *buildable* by pinning down the two halves — because the cockpit is only as alive as the events behind it. **The rule: design the event stream first; the UI is a rendering of it.** (You were right to weight UI heavily — modern users expect to *see* the backend working; this is what makes "show me what's happening" real instead of a spinner, and it's a genuine differentiator for a governed control-tower product.)
+
+### Part 1 — The event vocabulary (what the backend must emit)
+
+Every event is a plain dict `{event_type, agent, run_id, data, timestamp, id}` (`id` is monotonic per run → drives WS5 `Last-Event-ID` replay). Emit to the SSE bus **and** persist to the trace/audit store so the timeline survives reconnect *and* a process restart.
+
+| Event | `data` payload | Feeds (UI) |
+|---|---|---|
+| `run_started` / `run_completed` / `run_failed` | `{intent}` / `{}` / `{class, message}` | RunSelector, metrics |
+| `state_changed` | `{from, to}` | WorkflowGraph, state strip |
+| `agent_started` / `agent_finished` | `{agent, stage}` / `{agent, duration_ms}` | TraceTimeline span, graph pulse |
+| `tool_called` / `tool_result` | `{tool, args}` / `{tool, ok, summary}` | TraceRow + Inspector |
+| `llm_call_started` / `llm_token` / `llm_call_finished` | `{model}` / `{delta}` / `{completion_tokens, cost_usd, latency_ms}` | streaming text + RunMetricsBar |
+| `artifact_written` | `{kind, ref, diff?}` | Inspector (diff), graph badge |
+| `gate_opened` / `gate_decided` | `{gate, artifact_ref, context}` / `{gate, decision, actor, reason}` | GateDecisionPanel, graph diamond |
+| `log` | `{level, msg}` | LogsPanel (your "logs on the UI") |
+| `error` | `{where, message, class}` | TraceRow (red), banner |
+
+This vocabulary is also the seam for **A2** (event-sourcing) and **A6** (the `actor` on `gate_decided` is the real approver identity). Define it once; everything downstream — UI, audit, traces — reads from it.
+
+### Part 2 — The component tree (what renders them)
+
+```
+<Cockpit>
+  <RunSelector/>          // pick run; shows status dot
+  <WorkflowGraph/>        // React Flow — agents = nodes, handoffs = edges, gates = diamonds;
+                          //   ACTIVE node pulses, edge lights up as control hands off
+  <TraceTimeline/>        // streaming rows from the event bus, grouped by agent span
+    <TraceRow/>           //   one event: icon · label · duration · token cost · status
+  <Inspector/>           // master-detail: click a row/node → full input/output, prompt,
+                          //   structured output, artifact diff, tool args
+  <GateDecisionPanel/>   // WS8 — approve / reject(+reason) / request-changes → Command(resume=...)
+  <LogsPanel/>           // filterable structured logs (log events) — by agent / level / run
+  <RunMetricsBar/>       // cost · per-stage latency · attempts
+  <ConnectionStatus/>    // SSE connected / reconnecting (drives Last-Event-ID resume)
+```
+
+### Event → component mapping (the live wiring)
+`llm_token` → TraceTimeline streams text **+** RunMetricsBar tallies tokens · `state_changed` → WorkflowGraph advances the highlight · `gate_opened` → GateDecisionPanel surfaces **+** the graph diamond turns amber · `artifact_written` → Inspector enables the diff · `tool_called`/`tool_result` → a TraceRow you can expand in the Inspector · `log` → LogsPanel.
+
+### The "alive" cues (cheap, high impact)
+Active-agent **pulse**; edge **lights up** on handoff; **token streaming** (text appears as it's generated, not a spinner); relative timestamps that tick; **amber glow** on a waiting gate; trace auto-scroll with a "jump to latest" pin. These five do ~90% of the "it's really working" effect for near-zero cost.
+
+### You already proved this (Continuum → pdic mapping)
+You don't have to invent these — lift them from your Continuum cockpit:
+
+| pdic component | Continuum analog to lift |
+|---|---|
+| `WorkflowGraph` | `AgentGraph` |
+| `TraceTimeline` | `ActivityStream` |
+| `Inspector` | `ArtifactViewer` |
+| `GateDecisionPanel` | `GateInbox` |
+| `RunMetricsBar` | `RunMetrics` |
+| evidence / progress view | `EvidenceStack` / `Spine` |
+
+### Build rule for the AI assistant
+**Emit the events (WS5 + WS6) before rendering.** Make the agents fire the *full* vocabulary on the **offline/stub path** (no credentials) so the cockpit is fully demoable with stub agents — that's what lets you show the entire experience before any real LLM is wired. **Never fake data in the UI:** if a panel is empty, the event behind it isn't being emitted yet — fix the backend, don't hard-code the frontend.
+
+**Done when:** with stub agents and zero credentials, starting a run paints the live timeline **+** agent graph in real time; clicking any step opens its detail; dropping/restoring the network loses no events; restarting the backend and resuming a gate continues the *same* trace.
+
+---
+
+## 14. Architecture track — bigger moves (you said "feel free")
 
 The WS cards above harden the skeleton in place. These six are **structural** — they change the shape of the system, not just its correctness. Run them as a **parallel track** that the feature workstreams ride on: the two cheap, pure-refactor ones (A3 + A4) fold into WS1/WS2 early; the rest are staged so the app stays runnable. Where a pattern is already **proven in Continuum** (your other implementation), I say so — you can lift the approach rather than re-derive it.
 
@@ -283,7 +348,7 @@ optional/last ─ A2 full event-sourcing       (only if replay is actually requi
 
 ---
 
-## 14. How an AI coding assistant will actually execute this
+## 15. How an AI coding assistant will actually execute this
 
 You asked specifically how Copilot / Cursor / Claude *interpret existing code and make changes* — design the prompts to match how they work:
 
@@ -309,14 +374,14 @@ If the real files differ from these assumptions, STOP and report the delta befor
 
 ---
 
-## 15. Risk register
+## 16. Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | AI follows guide literally → re-firing side-effects on resume | High | High (dup PRs, double spend, corrupt audit) | §4.1 invariant stated in every gate-touching prompt; WS2 double-resume test |
 | Connection exhaustion from per-run Postgres pools | Med | High (prod outage) | §5 single `AsyncConnectionPool`; never `.from_conn_string()` per call |
 | `thread_id` mismatch → "resume does nothing" | Med | High (stuck runs) | §5 thread `thread_id=work_item_id` through start+resume; assert in runner |
-| Cockpit rewrite breaks working SSE/gate logic | Med | Med | §14 "modify in place, no wholesale rewrite"; one PR per WS |
+| Cockpit rewrite breaks working SSE/gate logic | Med | Med | §15 "modify in place, no wholesale rewrite"; one PR per WS |
 | SSE event loss on reconnect mistaken for "backend bug" | Med | Med | WS5 replay + Last-Event-ID; network-drop test |
 | FE/BE state enum drift | Med | Med | WS10 shared/generated types |
 | Migrating SQLite→Postgres loses local data | Low | Low (dev only) | WS3 dual-mode flag; Alembic baseline or documented drop/recreate |
@@ -327,7 +392,7 @@ If the real files differ from these assumptions, STOP and report the delta befor
 
 ---
 
-## 16. Sequenced summary (what to do, in order)
+## 17. Sequenced summary (what to do, in order)
 
 **Feature track (harden in place):**
 
@@ -343,13 +408,15 @@ If the real files differ from these assumptions, STOP and report the delta befor
 10. **WS10** One shared source of truth for states/events.
 11. **WS11** *(optional)* Grounding layer into the WS6 seam.
 
-**Architecture track (structural — §13):** A3 hexagonal core + A4 policy engine (early, pure refactors) → A1 thin-API/durable-worker (right after WS3) → A5 ports + per-tenant registry (with WS6) → A6 tenancy/auth/approver identity (after the loop is durable) → A2 full event-sourcing (last, optional).
+**Observability-first cockpit (§13):** define the typed event vocabulary the backend emits, then render it (trace timeline + live agent graph + inspector) — the UI is a rendering of the event stream, demoable on stub agents with zero credentials.
+
+**Architecture track (structural — §14):** A3 hexagonal core + A4 policy engine (early, pure refactors) → A1 thin-API/durable-worker (right after WS3) → A5 ports + per-tenant registry (with WS6) → A6 tenancy/auth/approver identity (after the loop is durable) → A2 full event-sourcing (last, optional).
 
 The reorder vs. the Master Guide is deliberate: **correctness (idempotent gates) and durability (Postgres checkpointer) land before the UI uplift**, because a polished cockpit over a non-resumable, double-firing backend is a demo that breaks the moment someone restarts the process or approves a gate twice. The architecture track front-loads the two *pure refactors* (A3+A4) because they cost almost nothing and make every later change cleaner.
 
 ---
 
-## 17. Sources (verified June 2026)
+## 18. Sources (verified June 2026)
 
 - LangGraph interrupts / re-execution on resume — [LangChain docs: Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts) · [DeepWiki: HITL & Interrupts](https://deepwiki.com/langchain-ai/langgraph/3.7-human-in-the-loop-and-interrupts) · [interrupt() reference](https://reference.langchain.com/python/langgraph/types/interrupt)
 - `Command(resume=...)` pattern — [LangChain docs: Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts) · [BSWEN: interrupt() pattern (2026)](https://docs.bswen.com/blog/2026-04-16-langgraph-human-in-the-loop/)
