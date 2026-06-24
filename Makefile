@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-p0 verify-p1 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-p0 verify-p0-auth verify-p02 verify-p1 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -129,6 +129,14 @@ verify-m13:
 verify-p0:
 	@echo "Running P0.1 Durable Execution verification (4/4)..."
 	python scripts/verify_p0_durable_execution.py
+
+verify-p0-auth:
+	@echo "Running P0.3 Auth + Tenancy verification (6/6)..."
+	python scripts/verify_p0_3_auth.py
+
+verify-p02:
+	@echo "Running P0.2 Box Lite verification (4/4)..."
+	python scripts/verify_p02_boxlite.py
 
 verify-p1:
 	@echo "Running P1.1 Gate Independence verification (6/6)..."

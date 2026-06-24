@@ -25,6 +25,7 @@ python scripts/verify_m11_spec_registry.py # must print 4/4
 python scripts/verify_m12_compliance.py     # must print 3/3
 python scripts/verify_m13_state_machine.py  # must print 6/6
 python scripts/verify_p0_durable_execution.py  # must print 4/4
+python scripts/verify_p02_boxlite.py           # must print 4/4
 python scripts/verify_p1_gate_independence.py # must print 6/6
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
