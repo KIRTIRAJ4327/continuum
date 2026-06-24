@@ -92,6 +92,25 @@ def _combine_detail(named_gates: List[tuple], ok_text: str) -> str:
     return ok_text
 
 
+def _exec_evidence(state: Any, step: str) -> tuple:
+    """
+    P0.2: extract real ExecResult evidence from Box Lite if present.
+    Returns (status_str, stdout_snippet) or (None, None) to fall back to gate status.
+    `step` is one of "lint", "typecheck", "test".
+    """
+    ev_store = getattr(state, "_exec_evidence", None)
+    if ev_store is None:
+        return None, None
+    for role in ("database", "backend", "frontend", "security", "developer"):
+        role_ev = ev_store.get(role, {})
+        if step in role_ev:
+            r = role_ev[step]
+            status = "pass" if r.get("returncode") == 0 else "fail"
+            snippet = (r.get("stdout") or "")[:300].strip()
+            return status, snippet or f"rc={r.get('returncode')}"
+    return None, None
+
+
 def _scope_status(state: Any) -> str:
     """Layer-4 status driven by M7 state.mapping_fidelity."""
     bm = getattr(state, "business_mappings", []) or []
@@ -164,6 +183,16 @@ def build_evidence_stack(
         build_detail = _gate_detail(local_verify, "lint, types, and build clean")
         regression_status = _gate_status(local_verify)
         regression_detail = _gate_detail(local_verify, "test suite green")
+
+    # P0.2: upgrade layers 1+2 with real BoxLite ExecResult when available.
+    # Box Lite evidence takes priority over gate-status strings — it's real stdout.
+    _ev_lint, _ev_lint_detail = _exec_evidence(state, "lint")
+    if _ev_lint is not None:
+        build_status, build_detail = _ev_lint, _ev_lint_detail
+
+    _ev_test, _ev_test_detail = _exec_evidence(state, "test")
+    if _ev_test is not None:
+        regression_status, regression_detail = _ev_test, _ev_test_detail
 
     # Layer 6 — human review: combine the three approval flags.
     approvals = {

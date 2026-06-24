@@ -1188,12 +1188,12 @@ export interface PaginatedResponse<T> {{
 
 def _sandbox_or_local_path(state: ContinuumState, ctx: AgentContext) -> str:
     """
-    Resolve where the dev/security gate should look.
-
-    M0: if the developer wrote files to state.code, they haven't been
-    materialised on disk, so the gate runs against the repo (ctx.repo_path).
-    Real sandbox execution will replace this with a sandbox workspace path.
+    P0.2: if a BoxLite (or any sandbox with a .workdir) is active, return its
+    path so gates run against real generated files.  Falls back to ctx.repo_path
+    for Tier-1 agents and offline paths without an active box.
     """
+    if ctx.sandbox is not None and hasattr(ctx.sandbox, "workdir"):
+        return str(ctx.sandbox.workdir)
     return ctx.repo_path or "."
 
 
@@ -1220,6 +1220,36 @@ async def run_agent(
     run_id = ctx.run_id or (state.run_id or "")
     started = time.time()
     logger.info("[%s] Starting agent run", role.upper())
+
+    # P0.2: spin up BoxLite for Tier-2 developer agents when no sandbox supplied.
+    _TIER2_ROLES = {
+        AgentRole.DATABASE.value,
+        AgentRole.BACKEND.value,
+        AgentRole.FRONTEND.value,
+        AgentRole.SECURITY.value,
+    }
+    _owned_box = False
+    if role in _TIER2_ROLES and ctx.sandbox is None:
+        try:
+            from dataclasses import replace as _dc_replace
+            _box_skill = load_skill("sandbox")
+            _BoxLite = None
+            if _box_skill is not None:
+                # load_skill returns the skill fn; we need the BoxLite class from the same module
+                import importlib.util as _ilu
+                _sdir = _SKILLS_DIR / "sandbox"
+                _vdir = _latest_version_dir(_sdir)
+                if _vdir:
+                    _sspec = _ilu.spec_from_file_location("continuum_skill_sandbox", _vdir / "skill.py")
+                    _smod = _ilu.module_from_spec(_sspec)  # type: ignore[arg-type]
+                    _sspec.loader.exec_module(_smod)  # type: ignore[union-attr]
+                    _BoxLite = getattr(_smod, "BoxLite", None)
+            if _BoxLite is not None:
+                ctx = _dc_replace(ctx, sandbox=_BoxLite(run_id=run_id or "offline", agent=role))
+            _owned_box = True
+            logger.info("[%s] BoxLite workdir: %s", role.upper(), ctx.sandbox.workdir)
+        except Exception as _box_exc:  # noqa: BLE001
+            logger.debug("[%s] BoxLite unavailable (%s) — text path", role.upper(), _box_exc)
 
     # --- Emit agent_start ---
     if run_id:
@@ -1270,6 +1300,33 @@ async def run_agent(
             logger.error("[%s] Offline fallback also failed: %s", role.upper(), exc2)
             state.error_message = f"{role} failed: {exc2}"
             data = {}
+
+    # P0.2: extract diff + exec evidence from BoxLite before teardown.
+    if _owned_box and ctx.sandbox is not None:
+        try:
+            diff_text = await ctx.sandbox.diff()
+            if diff_text and not data.get("diff"):
+                data["diff"] = diff_text
+            # Store ExecResult evidence for Evidence Stack layers 1+2.
+            suite = getattr(ctx.sandbox, "_last_suite", None)
+            if suite:
+                state.gates = getattr(state, "gates", []) or []
+                # Store as a dict keyed by role for evidence_stack to read.
+                if not hasattr(state, "_exec_evidence"):
+                    state._exec_evidence = {}
+                state._exec_evidence[role] = {
+                    step: {
+                        "returncode": r.returncode,
+                        "stdout": r.stdout[:2000],
+                        "stderr": r.stderr[:500],
+                        "duration_s": round(r.duration_s, 3),
+                    }
+                    for step, r in suite.items()
+                }
+        except Exception as _ev_exc:  # noqa: BLE001
+            logger.debug("[%s] Evidence extraction error: %s", role.upper(), _ev_exc)
+        finally:
+            await ctx.sandbox.teardown()
 
     # M6: account for model cost before merging output (pop the private usage
     # key so it never leaks into apply_agent_output / artifacts).
