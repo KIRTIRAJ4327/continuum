@@ -165,6 +165,7 @@ def load_skill(name: str) -> Optional[Callable]:
             try:
                 spec = importlib.util.spec_from_file_location(f"continuum_skill_{name}", skill_file)
                 module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+                import sys as _sys; _sys.modules[f"continuum_skill_{name}"] = module  # noqa: E702 — @dataclass __module__ lookup
                 spec.loader.exec_module(module)  # type: ignore[union-attr]
                 fn = getattr(module, name, None)
             except Exception as exc:  # noqa: BLE001 - skill load must never crash a run
@@ -1232,18 +1233,17 @@ async def run_agent(
     if role in _TIER2_ROLES and ctx.sandbox is None:
         try:
             from dataclasses import replace as _dc_replace
-            _box_skill = load_skill("sandbox")
+            import importlib.util as _ilu
             _BoxLite = None
-            if _box_skill is not None:
-                # load_skill returns the skill fn; we need the BoxLite class from the same module
-                import importlib.util as _ilu
-                _sdir = _SKILLS_DIR / "sandbox"
-                _vdir = _latest_version_dir(_sdir)
-                if _vdir:
-                    _sspec = _ilu.spec_from_file_location("continuum_skill_sandbox", _vdir / "skill.py")
-                    _smod = _ilu.module_from_spec(_sspec)  # type: ignore[arg-type]
-                    _sspec.loader.exec_module(_smod)  # type: ignore[union-attr]
-                    _BoxLite = getattr(_smod, "BoxLite", None)
+            _sdir = _SKILLS_DIR / "sandbox"
+            _vdir = _latest_version_dir(_sdir)
+            if _vdir:
+                _sspec = _ilu.spec_from_file_location("continuum_skill_sandbox", _vdir / "skill.py")
+                _smod = _ilu.module_from_spec(_sspec)  # type: ignore[arg-type]
+                import sys as _sys
+                _sys.modules["continuum_skill_sandbox"] = _smod  # needed for @dataclass __module__ lookup
+                _sspec.loader.exec_module(_smod)  # type: ignore[union-attr]
+                _BoxLite = getattr(_smod, "BoxLite", None)
             if _BoxLite is not None:
                 ctx = _dc_replace(ctx, sandbox=_BoxLite(run_id=run_id or "offline", agent=role))
             _owned_box = True

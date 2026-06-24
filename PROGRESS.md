@@ -16,6 +16,35 @@ Entry format:
 
 ---
 
+## 2026-06-24 — P0.2: Box Lite — per-agent isolated execution environment (P0.2)
+**Branch:** `feature/p02-box-lite`  ·  **Commit:** cdb001a (rebased onto dev)
+**What:** Adds `skills/sandbox/v1.0/skill.py` — the Box Lite ephemeral workdir for Tier-2
+developer agents (Database, Backend, Frontend, Security). Each run gets a per-agent isolated
+workdir backed by the host filesystem with real subprocess execution, real git diffs, and
+real exec evidence surfaced in the Evidence Stack. Zero new dependencies (stdlib only).
+The `orchestrator/agent_runner.py` automatically spins up a `BoxLite` instance for every
+Tier-2 role and tears it down after evidence extraction. `skills/scope_guard/v1.0/skill.py`
+now reads real files from the box workdir when a sandbox is injected. Evidence Stack layers 1+2
+are upgraded with real `ExecResult` stdout when BoxLite ran. Fixed the `sys.modules` registration
+issue in the skill loader so `@dataclass` types resolve correctly. Upgrade path: DockerBox →
+ACABox → HyperlightBox implement the same 5-method interface (`write/exec/diff/read/teardown`).
+**Files:** `skills/sandbox/v1.0/skill.py` (new), `orchestrator/agent_runner.py` (BoxLite init
++ sys.modules fix + evidence extraction), `skills/scope_guard/v1.0/skill.py` (real-file scan),
+`evals/evidence_stack.py` (P0.2 exec evidence + P1.1 gate independence merged),
+`scripts/verify_p02_boxlite.py` (new), `Makefile` (verify-p02 target), `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core: 11/11 ✅
+- verify_m0_loop: 3/3 ✅
+- verify_m3_learning: 6/6 ✅  · verify_m5_evolution: 6/6 ✅
+- verify_m6_workqueue: 6/6 ✅ · verify_m7_scope_guard: 2/2 ✅
+- verify_m8_repo_split: 3/3 ✅ · verify_m9_maf_pilot: 6/6 ✅
+- verify_m10_assert: 6/6 ✅
+- **verify_p02_boxlite: 4/4 ✅** (write+exec→rc0, failure→rc1, timeout→rc-1, teardown→gone)
+- evals/ci_gate.py: exit 0 ✅
+**Notes:** Local-exec BoxLite is intentionally the starting point — real sandbox hardening (no
+local-exec fallback in production) is a P0.2 follow-up requiring Hyper-V / ACA dynamic sessions.
+`CONTINUUM_TARGET_REPO` or `ctx.repo_path` still used as fallback when BoxLite is unavailable.
+
 ## 2026-06-17 — P0.1: Durable Execution — run persistence layer (P0.1)
 **Branch:** `feature/p0-durable-execution`  ·  **Commit:** pending
 **What:** Adds `graph_db/run_store.py` `RunStore` — a two-tier persistence layer for
