@@ -111,6 +111,9 @@ class _EventBus:
         self._queues: Dict[str, List[asyncio.Queue]] = {}
         # run_id → ordered event log (for late-joining subscribers)
         self._log: Dict[str, List[Dict[str, Any]]] = {}
+        # C1: run_id → next monotonic seq. Set ONCE per event on emit; never
+        # renumbered on replay. Enables SSE `id:` frames + Last-Event-ID resume.
+        self._seq: Dict[str, int] = {}
 
     # ------------------------------------------------------------------ #
     # Emit
@@ -120,6 +123,11 @@ class _EventBus:
         if not run_id:
             return
         event.setdefault("timestamp", time.time())
+        # C1: stamp a per-run monotonic seq exactly once (idempotent if already set).
+        if "seq" not in event:
+            seq = self._seq.get(run_id, 0)
+            event["seq"] = seq
+            self._seq[run_id] = seq + 1
         log = self._log.setdefault(run_id, [])
         if len(log) < _MAX_LOG:
             log.append(event)
@@ -173,6 +181,7 @@ class _EventBus:
         """Drop all state for a completed run (call when run is finalized)."""
         self._queues.pop(run_id, None)
         self._log.pop(run_id, None)
+        self._seq.pop(run_id, None)  # C1: reset the monotonic counter too
 
     def run_history(self, run_id: str) -> List[Dict[str, Any]]:
         """Return a copy of the event log for a run (used by the artifact endpoint)."""

@@ -43,11 +43,36 @@ class ContinuumGraph:
     async def async_init(self) -> None:
         """Set up the async checkpointer and compile the graph."""
         try:
-            import psycopg
             from langgraph_checkpoint_postgres import AsyncPostgresSaver
 
-            conn = await psycopg.AsyncConnection.connect(self._checkpointer_uri)
-            self.checkpointer = AsyncPostgresSaver(conn)
+            # C1 FIX 2: use a connection POOL, not a single bare connection.
+            # A shared AsyncConnection serialises all concurrent runs onto one
+            # socket; under load that is a bottleneck (and a correctness hazard
+            # if two runs interleave on the same cursor). A small pool gives each
+            # in-flight run its own connection.
+            try:
+                from psycopg_pool import AsyncConnectionPool
+
+                pool = AsyncConnectionPool(
+                    self._checkpointer_uri,
+                    min_size=1,
+                    max_size=5,
+                    open=False,
+                )
+                await pool.open(wait=True)
+                self.checkpointer = AsyncPostgresSaver(pool)
+            except ImportError:
+                # psycopg-pool absent: fall back to a single connection. Works,
+                # but NOT suitable for concurrent runs.
+                import psycopg
+
+                logger.warning(
+                    "psycopg-pool unavailable; using a single connection — "
+                    "not suitable for concurrent runs"
+                )
+                conn = await psycopg.AsyncConnection.connect(self._checkpointer_uri)
+                self.checkpointer = AsyncPostgresSaver(conn)
+
             await self.checkpointer.setup()   # creates checkpoint tables on first run
         except ImportError:
             # langgraph-checkpoint-postgres not installed; run without checkpointing
@@ -255,6 +280,24 @@ class ContinuumGraph:
 
             gate_name = state.approval_gate_name or "unknown"
             message = _gate_message(gate_name)
+
+            # C1 FIX 3: idempotency guard. LangGraph re-enters a node from the top
+            # on resume; a double-submit of the approve button (or a duplicate
+            # Command(resume=)) must not run the approval logic twice. If this gate
+            # is already resolved, clear the pending flag and return WITHOUT calling
+            # interrupt() again (which would re-suspend the run).
+            _named = ("story_review", "design_review", "merge_review")
+            already_resolved = (
+                (gate_name == "story_review" and state.story_approved)
+                or (gate_name == "design_review" and state.design_approved)
+                or (gate_name == "merge_review" and state.merge_approved)
+                or (gate_name not in _named and not state.human_approval_pending)
+            )
+            if already_resolved:
+                logger.info("[HUMAN_GATE] Gate '%s' already resolved — skipping interrupt", gate_name)
+                state.human_approval_pending = False
+                state.approval_gate_name = None
+                return state
 
             decision = interrupt({
                 "gate": gate_name,

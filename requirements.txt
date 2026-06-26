@@ -41,6 +41,7 @@ pydantic>=2.5.0
 # --- Database (checkpointer) ---
 # langgraph-checkpoint-postgres requires psycopg3 (NOT psycopg2)
 psycopg[binary]>=3.1.0                 # psycopg3; replaces psycopg2-binary
+psycopg-pool>=3.2                      # C1: AsyncConnectionPool for the checkpointer (optional; single-conn fallback)
 asyncpg>=0.29.0                        # still used by direct async queries if needed
 
 # --- Observability ---

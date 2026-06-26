@@ -16,6 +16,39 @@ Entry format:
 
 ---
 
+## 2026-06-26 — C1: Correctness Sprint — SSE resume, conn pool, idempotent gate, graph resume (C1)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+**What:** First of the five "competitive readiness" sprints (Complete Solution Plan). Four
+correctness fixes that make Continuum reliable at scale. **FIX 1** — monotonic per-run event
+`seq` on the event bus (`_EventBus._seq`, stamped once in `emit()`, reset in `purge()`); the SSE
+endpoint now emits `id: <seq>` frames and honours `Last-Event-ID`, replaying only events with
+`seq >= resume_seq` so a browser reconnect resumes exactly where it dropped instead of re-sending
+all history; `useSSE` tracks `lastSeq`, stops closing the EventSource on error (lets the browser
+auto-reconnect with `Last-Event-ID`), and exposes a `reconnecting` flag. **FIX 2** —
+`ContinuumGraph.async_init()` uses `psycopg_pool.AsyncConnectionPool` (min 1 / max 5) for the
+Postgres checkpointer instead of a single shared `AsyncConnection`, with a single-connection
+fallback + WARNING when `psycopg-pool` is absent. **FIX 3** — `_human_gate_node` gained an
+idempotency guard: if the gate is already resolved (double-submit / double-resume) it clears the
+pending flag and returns without re-`interrupt()`. **FIX 4** — `resume_run()` drives
+`Command(resume=)` against the durable graph when `POSTGRES_DSN` is set (module-level `_GRAPH`
+built at startup), falling back to the in-memory `_execute_pipeline()` re-drive offline.
+**Files:** `orchestrator/events.py` (seq), `api/main.py` (SSE `id:`/Last-Event-ID, `_GRAPH`,
+resume wiring), `orchestrator/graph.py` (conn pool, idempotency guard), `ui/src/hooks/useSSE.ts`,
+`ui/src/types.ts` (seq field), `requirements.txt` (psycopg-pool), `scripts/verify_c1_correctness.py`
+(new), `Makefile` (verify-c1), `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core 11/11 ✅ · verify_m0_loop 3/3 ✅ · verify_m3_learning 6/6 ✅
+- verify_m5_evolution 6/6 ✅ · verify_m6_workqueue 6/6 ✅ · verify_m7_scope_guard 2/2 ✅
+- verify_m8_repo_split 3/3 ✅ · verify_m9_maf_pilot 6/6 ✅ · verify_m10_assert 6/6 ✅
+- verify_m11_spec_registry 4/4 ✅ · verify_m12_compliance 3/3 ✅ · verify_m13_state_machine 6/6 ✅
+- verify_p0_durable_execution 4/4 ✅ · verify_p02_boxlite 4/4 ✅ · verify_p1_gate_independence 6/6 ✅
+- **verify_c1_correctness 5/5 ✅** (seq 0,1,2; pre-stamped seq preserved; replay filter; double-resume once; purge resets)
+- evals/ci_gate.py exit 0 ✅ · `import api.main` clean without langgraph (offline path)
+**Notes:** seq is additive — existing event consumers ignore it. `Command(resume=)` and the
+connection pool activate only when `POSTGRES_DSN` is set; the offline verify suite is byte-unchanged.
+UI build (`npm run build`) deferred to the C2/C4 UI sprints. Per-gate retry budgets remain a
+follow-up. Next: C2 observability (richer event vocabulary + cockpit UI), which builds on `seq`.
+
 ## 2026-06-24 — P0.2: Box Lite — per-agent isolated execution environment (P0.2)
 **Branch:** `feature/p02-box-lite`  ·  **Commit:** cdb001a (rebased onto dev)
 **What:** Adds `skills/sandbox/v1.0/skill.py` — the Box Lite ephemeral workdir for Tier-2

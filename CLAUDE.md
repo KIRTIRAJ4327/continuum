@@ -27,6 +27,7 @@ python scripts/verify_m13_state_machine.py  # must print 6/6
 python scripts/verify_p0_durable_execution.py  # must print 4/4
 python scripts/verify_p02_boxlite.py           # must print 4/4
 python scripts/verify_p1_gate_independence.py # must print 6/6
+python scripts/verify_c1_correctness.py        # must print 5/5
 python evals/ci_gate.py               # must exit 0 (no regression vs baseline)
 ```
 

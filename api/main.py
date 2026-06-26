@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
@@ -52,11 +52,22 @@ async def startup() -> None:
 
     Also validates optional env vars (offline stub mode warnings).
     """
-    global _STORE
+    global _STORE, _GRAPH
     dsn = os.getenv("POSTGRES_DSN", "").strip()
     _STORE = await RunStore.create(dsn=dsn or None)
     if dsn:
         await _STORE.restore_active()
+        # C1 FIX 4: when Postgres is configured, build the durable LangGraph so
+        # resume can go through Command(resume=) against the checkpointer instead
+        # of re-driving _execute_pipeline(). Best-effort — any failure leaves
+        # _GRAPH = None and the in-memory resume path stays in force.
+        try:
+            from orchestrator.graph import ContinuumGraph
+            _GRAPH = await ContinuumGraph.create(dsn)
+            logger.info("[startup] ContinuumGraph durable path active (Command(resume=))")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[startup] ContinuumGraph unavailable (%s) — using _execute_pipeline resume", exc)
+            _GRAPH = None
 
     try:
         from config import warn_missing_optional, AZURE_AI_LIVE, AZURE_ADO_LIVE  # type: ignore
@@ -89,6 +100,9 @@ app.add_middleware(
 # P0.1: RunStore — Postgres-backed when POSTGRES_DSN is set, in-memory otherwise.
 # _RUNS is the module-level _MEMORY dict from run_store (same object, no copy).
 _STORE: Optional[RunStore] = None
+# C1 FIX 4: durable LangGraph instance, set at startup only when POSTGRES_DSN is
+# present. When None (the offline default), resume re-drives _execute_pipeline().
+_GRAPH: Optional[Any] = None
 _MAX_RETRIES = 3
 
 
@@ -471,27 +485,38 @@ async def get_run(run_id: str) -> Dict[str, Any]:
 
 
 @app.get("/events/{run_id}")
-async def stream_events(run_id: str) -> StreamingResponse:
+async def stream_events(run_id: str, request: Request) -> StreamingResponse:
     """
     Server-Sent Events stream for a run.  Replays historical events first
     (so a late-joining client does not miss agent_start / agent_complete
     events that already fired), then streams live events until run_complete.
+
+    C1: each frame carries an `id: <seq>` line. On reconnect the browser sends
+    `Last-Event-ID`; we replay only events with seq > that value, so a dropped
+    connection resumes exactly where it left off instead of re-sending history.
     """
     if run_id not in _RUNS:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+
+    # C1: resume point from the Last-Event-ID header (browser sets it automatically).
+    last_id = request.headers.get("last-event-id")
+    resume_seq = int(last_id) + 1 if last_id and last_id.lstrip("-").isdigit() else 0
 
     async def _generator():
         q, history = event_bus.subscribe(run_id)
         try:
             # Replay history so the UI catches up immediately on first connect.
+            # On reconnect, skip everything the client already saw.
             for ev in history:
-                yield f"data: {json.dumps(ev, default=str)}\n\n"
+                if ev.get("seq", 0) < resume_seq:
+                    continue
+                yield f"id: {ev.get('seq', '')}\ndata: {json.dumps(ev, default=str)}\n\n"
 
             # Stream live events.
             while True:
                 try:
                     ev = await asyncio.wait_for(q.get(), timeout=25.0)
-                    yield f"data: {json.dumps(ev, default=str)}\n\n"
+                    yield f"id: {ev.get('seq', '')}\ndata: {json.dumps(ev, default=str)}\n\n"
                     if ev.get("event_type") == "run_complete":
                         break
                 except asyncio.TimeoutError:
@@ -615,16 +640,35 @@ async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
     })
 
     if approved:
-        # Resume the pipeline in a background task from where it left off.
-        async def _resume_bg() -> None:
-            try:
-                await _execute_pipeline(state, run_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Resumed pipeline failed for run %s", run_id)
-                state.error_message = str(exc)
-                state.completed_at = time.time()
+        # C1 FIX 4: prefer the durable LangGraph resume (Command(resume=)) when the
+        # graph path is active (POSTGRES_DSN set). This makes the checkpointer the
+        # source of truth for durable runs. Falls back to re-driving the in-memory
+        # _execute_pipeline() when _GRAPH is None (the offline default).
+        if _GRAPH is not None:
+            async def _graph_resume() -> None:
+                try:
+                    from langgraph.types import Command
+                    await _GRAPH.graph.ainvoke(
+                        Command(resume={"approved": True}),
+                        config={"configurable": {"thread_id": run_id}},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Graph resume failed for run %s", run_id)
+                    state.error_message = str(exc)
+                    state.completed_at = time.time()
 
-        asyncio.create_task(_resume_bg())
+            asyncio.create_task(_graph_resume())
+        else:
+            # Resume the pipeline in a background task from where it left off.
+            async def _resume_bg() -> None:
+                try:
+                    await _execute_pipeline(state, run_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Resumed pipeline failed for run %s", run_id)
+                    state.error_message = str(exc)
+                    state.completed_at = time.time()
+
+            asyncio.create_task(_resume_bg())
 
     return {"run_id": run_id, "approved": approved, "status": _classify(state)}
 

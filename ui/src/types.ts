@@ -17,6 +17,7 @@ export interface AgentEvent {
   agent: string;
   run_id: string;
   timestamp: number;
+  seq?: number;   // C1: per-run monotonic sequence (SSE id / Last-Event-ID resume)
   data: Record<string, unknown>;
 }
 
