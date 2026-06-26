@@ -360,6 +360,52 @@ the verify suite still holds throughout.
 - **P1.2 Observability** — OTel (M10 hook) exported to App Insights / Langfuse: real
   traces, real cost (not the offline `$0.02` stub), per-stage latency, stuck-run alerts.
 
+## Competitive Readiness (C1–C4) — completeness track
+
+Turning the governed POC into a *complete* product people can run and demo. Five
+properties — Correctness, Observability, Trustworthiness, Operability,
+Extensibility — and the sprints that close each (see `Continuum-Complete-Solution-Plan.md`
+and the positioning in `COMPETITIVE-ANALYSIS.md`). All offline-safe; each ships
+its own verify script on the non-negotiable list.
+
+- **C1 Correctness** — ✅ **shipped**. Monotonic per-run event `seq`
+  (`orchestrator/events.py`) → SSE `id:` frames + `Last-Event-ID` resume in
+  `stream_events` (replay only `seq >= resume_seq`); `useSSE` reconnects natively
+  (no `es.close()` in `onerror`). `ContinuumGraph.async_init` uses
+  `psycopg_pool.AsyncConnectionPool` (single-conn fallback). `_human_gate_node`
+  idempotency guard (no double-approve / re-`interrupt()`). `resume_run` drives
+  `Command(resume=)` against the durable graph when `POSTGRES_DSN` is set
+  (`_GRAPH`), else the in-memory `_execute_pipeline` re-drive. `verify_c1_correctness.py` 5/5.
+- **C2 Observability** — ✅ **shipped**. Nine offline-safe event types
+  (`tool_call`, `llm_token`, `agent_thinking`, `agent_milestone`, `artifact_ready`,
+  `sensor_result`, `scope_checked`, `evidence_built`, `controlled_hold`), all
+  carrying `seq`; emitted from `agent_runner` (per-sensor results + milestone +
+  artifact) and `_execute_pipeline` (scope_checked, evidence_built). UI:
+  `TraceTimeline` + 3-tier `ActivityStream` + the "agent cannot merge/deploy/modify
+  rules" reassurance row. Events fire only when a `run_id` is set, so M0 verifiers
+  are byte-unchanged. `verify_c2_observability.py` 3/3.
+- **P0.3 Auth + tenancy** — ✅ **shipped** (the real-client gate). `auth/`
+  leaf package: `identity.py` (`Principal` + `resolve_principal`), `rbac.py`
+  (Role/Permission matrix + `require`), `tenancy.py` (`tenant_key` + `visible_runs`).
+  Every route resolves a `Principal` (`current_principal`), `require()`s a permission,
+  stamps `state.tenant_id`, scopes `GET /runs` to the caller's tenant, records the
+  approver onto `state.gate_approvals` (closes M12's null approver identity).
+  Offline default → ADMIN `DEV_PRINCIPAL` in the `default` tenant, so the suite is
+  unchanged. `verify_p0_3_auth.py` 6/6. (Live JWT/Entra-ID + per-tenant Neo4j
+  subgraph isolation are live-only follow-ups behind the same seams.)
+- **C3 Extensibility** — ✅ **shipped**. `POST /webhooks/ado` (`api/webhooks.py`:
+  `parse_mapping_tags`/`extract_intent`/`should_trigger`) starts a run from an ADO
+  work item; `integrations/notifications.py` (Slack/Teams, stdlib urllib,
+  `get_notifiers() == []` offline) fires on gate-pending; `agent_runner._load_repo_config`
+  reads `{target_repo}/.pdlc/config.yml` (`docs/PDLC_CONFIG.md`) so a new app onboards
+  via config, not code. `verify_c3_extensibility.py` 3/3. (Wiring the split gates to
+  the per-app `*_cmd` is a follow-up; the loader is in place.)
+- **C4 Polish** — ✅ **shipped (partial)**. React 19 (`ui` builds clean);
+  opt-in `integrations/langfuse_tracer.py` (`trace_run`/`score_run`, Evidence-Stack
+  pass-rate as a Langfuse score; no-op + never imports the SDK unless `LANGFUSE_*`
+  set; `docs/LANGFUSE_SETUP.md`). **Deferred:** the `api/router/*` split (pure reorg,
+  regression risk, no behaviour change).
+
 ## Adding a New Skill
 
 1. Create `skills/<skill_name>/v1.0/skill.py` with a single `async def <skill_name>(...)`.

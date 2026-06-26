@@ -746,6 +746,58 @@ P1.3 = M12, P2.1 = M11, P2.2 = M13, P2.3 = M14.
 
 ---
 
+## 🏁 Why Continuum (not Devin / Copilot)
+
+DORA's 2025 research is blunt: AI raises delivery throughput **and** delivery
+instability — the speed won at code-generation is lost to "downstream disorder"
+in testing, review, and release. Its conclusion: *"The next stage of DevOps
+maturity is not just automation. It is governance, observability, and trust."*
+
+That is the market Continuum is built for. There are **two markets**, and they
+are not the same:
+
+| | Devin | GitHub Copilot | **Continuum** |
+|---|---|---|---|
+| Primary buyer | Engineering lead | Developer / eng lead | **CTO / CISO / Compliance** |
+| Problem solved | Junior-engineer tasks | Developer productivity | **Downstream disorder, governance** |
+| What "done" means | Merged PR | Merged PR | **Compliance report + merged PR** |
+| Learns between runs? | ❌ | ❌ | ✅ Neo4j episodes |
+| Auditor can read the output? | ❌ | ❌ | ✅ Compliance report (M12) |
+| Detects spec drift? | ❌ | ❌ | ✅ Spec Registry (M11) |
+| Human approval gates | ❌ | ❌ | ✅ G1–G4, policy-governed (M13) |
+| Independent evidence stack | ❌ | ❌ | ✅ 6 layers (P1.1) |
+| Earns + revokes autonomy | ❌ | ❌ | ✅ gate-removal ladder (roadmap) |
+| Model lock-in | Proprietary SWE model | Multi-model | **Model-agnostic** |
+
+Devin and Copilot **are the models**. Continuum is **the governance layer that
+runs underneath the model** — and it doesn't matter whether that model is
+GPT-5, Claude, or Gemini, because the value is in the governance, not the
+generation.
+
+**The three questions no competitor can answer** (and Continuum answers on every run):
+
+1. **Who approved this change, when, and on what basis?** — attributed gate
+   approvals (P0.3 identity) in an append-only audit trail, packaged in the
+   compliance report.
+2. **How do you know the code does what the business requirement says?** — the
+   human-approved spec becomes the acceptance criteria; the scope-guard (M7)
+   confirms the code uses exactly the business mappings supplied — nothing
+   invented; six independently-sourced evidence signals back the claim.
+3. **If this change is wrong, can you trace exactly what happened?** — the
+   15-state machine records every transition; the Spec Registry shows which spec
+   version this run was built against; `GET /runs/{id}/compliance-report` is one
+   call away.
+
+> **Honest scoping.** Continuum does *not* compete on raw code-gen speed, IDE
+> integration, or fleet-scale parallelism today (parallel agent fan-out is
+> planned for M14; the sandbox is Box Lite → ACA on the roadmap). It competes —
+> and currently stands alone — on **governed delivery for regulated enterprises**.
+
+Full analysis: [`COMPETITIVE-ANALYSIS.md`](./COMPETITIVE-ANALYSIS.md) ·
+delivery roadmap: [`Continuum-Complete-Solution-Plan.md`](./Continuum-Complete-Solution-Plan.md).
+
+---
+
 ## ⚡ Quick Start
 
 ### Prerequisites
@@ -927,6 +979,8 @@ continuum/
 | [`Continuum-Agentic-SDLC-PRD.md`](./Continuum-Agentic-SDLC-PRD.md) | PRD v2.2 *(superseded by v3.0)* — original M0–M5 POC spec: 9 rules, PEV model, 3-tier permissions, eval harness spec |
 | [`Continuum-Architecture.mermaid`](./Continuum-Architecture.mermaid) | System architecture diagram — 7 planes |
 | [`Continuum-Research-Report.md`](./Continuum-Research-Report.md) | Research backing — 5 sources: Hyperlight, dynamic workflows, Code as Agent Harness, Princeton HAL, 2026 eval literature |
+| [`COMPETITIVE-ANALYSIS.md`](./COMPETITIVE-ANALYSIS.md) | **Why us, not them** — Devin / Copilot / Continuum matrix, the two-markets thesis, the three auditor questions, gap + moat analysis |
+| [`Continuum-Complete-Solution-Plan.md`](./Continuum-Complete-Solution-Plan.md) | Completeness analysis + the C1–C4 / P0.3 delivery sprints (correctness, observability, auth/tenancy, extensibility, polish) |
 | [`CROSS-VALIDATION.md`](./CROSS-VALIDATION.md) | PRD vs implementation gap analysis |
 | [`Claude-Code-Handoff.md`](./Claude-Code-Handoff.md) | M0 brief for Claude Code |
 
