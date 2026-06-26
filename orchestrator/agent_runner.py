@@ -1215,6 +1215,43 @@ def _sandbox_or_local_path(state: ContinuumState, ctx: AgentContext) -> str:
     return ctx.repo_path or "."
 
 
+# C3: per-app build config. A target app declares its stack + commands in
+# {target_repo}/.pdlc/config.yml so onboarding a new app is config, not code.
+# Defaults reproduce Continuum's own Python toolchain, so absent config keeps
+# behaviour identical (backward compatible).
+_DEFAULT_REPO_CONFIG: Dict[str, Any] = {
+    "stack": "python",
+    "lint_cmd": "ruff check .",
+    "typecheck_cmd": "mypy . --ignore-missing-imports",
+    "test_cmd": "pytest -q",
+    "business_mappings": [],
+}
+
+
+def _load_repo_config(target_repo: str) -> Dict[str, Any]:
+    """
+    Read {target_repo}/.pdlc/config.yml and merge over the defaults.
+
+    Pure + offline-safe: returns the defaults when the file is absent or PyYAML
+    is unavailable, so the verify suite and Continuum's own repo are unaffected.
+    The returned dict always has stack / lint_cmd / typecheck_cmd / test_cmd /
+    business_mappings keys (typecheck_cmd may be None for stacks without one).
+    """
+    cfg = dict(_DEFAULT_REPO_CONFIG)
+    try:
+        from pathlib import Path as _Path
+        config_path = _Path(target_repo) / ".pdlc" / "config.yml"
+        if not config_path.exists():
+            return cfg
+        import yaml  # optional dep; absent → defaults
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            cfg.update({k: v for k, v in loaded.items() if v is not None or k == "typecheck_cmd"})
+    except Exception as exc:  # noqa: BLE001 — config errors degrade to defaults
+        logger.debug("[repo-config] using defaults (%s)", exc)
+    return cfg
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #

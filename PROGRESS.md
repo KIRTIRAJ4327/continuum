@@ -16,6 +16,36 @@ Entry format:
 
 ---
 
+## 2026-06-26 — C3: Extensibility — ADO webhook triggers, Slack/Teams notify, per-app .pdlc config (C3)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+**What:** The integration layer that lets external systems drive Continuum and lets new apps
+onboard via config rather than code. **Webhook triggers** — `POST /webhooks/ado` starts a run
+from an Azure DevOps work item (created, or moved to "Ready for Dev"); intent = title + description
+(HTML stripped), business mappings parsed from `mapping:BR=Branch,WEB=Web` tags; shared-secret
+header (`CONTINUUM_WEBHOOK_SECRET`) enforced unless `DEV_MODE`. Parsing lives in `api/webhooks.py`
+(`parse_mapping_tags` / `extract_intent` / `should_trigger`, all pure). **Notifications** —
+`integrations/notifications.py` `SlackNotifier`/`TeamsNotifier` POST (stdlib urllib, no aiohttp dep)
+only when their webhook URL env var is set; `get_notifiers()` returns `[]` offline; `notify_gate_pending`
+fires from the live gate-pending path. **Per-app config** — `agent_runner._load_repo_config()` reads
+`{target_repo}/.pdlc/config.yml` (stack / lint_cmd / typecheck_cmd / test_cmd / business_mappings),
+merging over Python defaults; documented in `docs/PDLC_CONFIG.md`. Onboarding a new app is now a
+config file, not a code change.
+**Files:** `api/webhooks.py` (new), `integrations/notifications.py` (new), `api/main.py`
+(`POST /webhooks/ado` + notify_gate_pending wiring + imports), `orchestrator/agent_runner.py`
+(`_load_repo_config` + defaults), `docs/PDLC_CONFIG.md` (new), `scripts/verify_c3_extensibility.py`
+(new), `Makefile` (verify-c3), `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core 11/11 ✅ · verify_m0_loop 3/3 ✅ · verify_m6_workqueue 6/6 ✅
+- verify_m12_compliance 3/3 ✅ · verify_p0_3_auth 6/6 ✅ · verify_c1_correctness 5/5 ✅
+- verify_c2_observability 3/3 ✅
+- **verify_c3_extensibility 3/3 ✅** (ADO parse/trigger/intent; .pdlc/config.yml loader + defaults; notifiers []-offline)
+- evals/ci_gate.py exit 0 ✅ · `import api.main` clean
+**Notes:** all integrations degrade to no-op when env vars are absent (offline-safe). Wiring the split
+gates to consume the per-app `*_cmd` from `.pdlc/config.yml` (instead of the built-in Python trio) is
+the active follow-up — the loader + schema + docs are in place; the gate execution path is unchanged
+to keep P1.1 gate independence stable. Webhook-triggered runs are owned by `CONTINUUM_WEBHOOK_TENANT`
+(default "default").
+
 ## 2026-06-26 — C2: Observability Cockpit — richer event vocabulary + trace timeline + 3-tier logs (C2)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 **What:** Makes the backend visible in the UI — agents working, sensors firing, evidence

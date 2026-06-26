@@ -35,6 +35,8 @@ from evals.evidence_stack import build_evidence_stack
 from api.compliance import build_compliance_report, render_compliance_html
 from orchestrator.state_machine import derive_lifecycle_state
 from graph_db.run_store import RunStore, _MEMORY as _RUNS
+from api.webhooks import parse_mapping_tags, extract_intent, should_trigger
+from integrations.notifications import notify_gate_pending
 from auth import (
     AuthError,
     DEFAULT_TENANT,
@@ -368,6 +370,8 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
                 "run_id": run_id,
                 "data": {"gate_name": state.approval_gate_name},
             })
+            # C3: alert reviewers on configured channels (no-op offline).
+            await notify_gate_pending(run_id, state.approval_gate_name or "", "Awaiting human approval.")
             # P0.1: checkpoint at every human gate so the run survives a restart
             if _STORE and run_id:
                 await _STORE.save(run_id, state)
@@ -572,6 +576,58 @@ async def start_run(
 async def whoami(principal: Principal = Depends(current_principal)) -> Dict[str, Any]:
     """P0.3: the resolved caller identity (offline → the ADMIN dev principal)."""
     return principal.to_dict()
+
+
+@app.post("/webhooks/ado")
+async def ado_webhook(
+    payload: Dict[str, Any],
+    x_continuum_secret: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    C3: receive an Azure DevOps work-item webhook and start a run when the event
+    is actionable (work item created, or moved to "Ready for Dev"). Intent is the
+    title + description; business mappings come from `mapping:` tags.
+
+    Auth: a shared-secret header (CONTINUUM_WEBHOOK_SECRET) is required when set;
+    the check is skipped in DEV_MODE so the offline path needs no secret. Runs
+    created here are owned by the configured webhook tenant (default "default").
+    """
+    secret = os.getenv("CONTINUUM_WEBHOOK_SECRET", "").strip()
+    dev_mode = os.getenv("DEV_MODE", "").strip() in ("1", "true", "True")
+    if secret and not dev_mode and x_continuum_secret != secret:
+        raise HTTPException(status_code=401, detail="invalid webhook secret")
+
+    if not should_trigger(payload):
+        return {"status": "ignored"}
+
+    intent = extract_intent(payload)
+    if not intent:
+        return {"status": "ignored", "reason": "empty intent"}
+
+    fields = (payload.get("resource", {}) or {}).get("fields", {}) or {}
+    mappings = parse_mapping_tags(str(fields.get("System.Tags", "")))
+
+    run_id = uuid.uuid4().hex[:12]
+    state = ContinuumState(
+        request=intent,
+        run_id=run_id,
+        started_at=time.time(),
+        business_mappings=mappings,
+        tenant_id=os.getenv("CONTINUUM_WEBHOOK_TENANT", "default"),
+    )
+    _RUNS[run_id] = state
+
+    async def _bg() -> None:
+        try:
+            await _execute_pipeline(state, run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Webhook-triggered pipeline failed for run %s", run_id)
+            state.error_message = str(exc)
+            state.run_status = "failed"
+            state.completed_at = time.time()
+
+    asyncio.create_task(_bg())
+    return {"status": "triggered", "run_id": run_id, "mappings": len(mappings)}
 
 
 @app.get("/runs")
