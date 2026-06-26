@@ -37,6 +37,7 @@ from orchestrator.state_machine import derive_lifecycle_state
 from graph_db.run_store import RunStore, _MEMORY as _RUNS
 from api.webhooks import parse_mapping_tags, extract_intent, should_trigger
 from integrations.notifications import notify_gate_pending
+from integrations.langfuse_tracer import trace_run, score_run
 from auth import (
     AuthError,
     DEFAULT_TENANT,
@@ -360,6 +361,10 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     ctx = AgentContext.from_env()
     ctx.run_id = run_id  # wire the run_id so run_agent() can emit events
 
+    # C4: open a Langfuse trace for the run (no-op unless LANGFUSE_* configured).
+    if run_id:
+        trace_run(run_id, state.request or "", getattr(state, "tenant_id", ""))
+
     async def _run(role: str) -> None:
         await run_agent(state, role, ctx)
         # Emit human-gate-pending if the run paused for approval
@@ -481,6 +486,8 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
                 "run_id": run_id,
                 "data": {"layers": layers},
             })
+            # C4: record the Evidence-Stack pass rate as a Langfuse score (no-op offline).
+            score_run(run_id, layers)
         except Exception as ev_exc:  # noqa: BLE001 — evidence emit must never break a run
             logger.debug("evidence_built emit failed: %s", ev_exc)
 

@@ -16,6 +16,30 @@ Entry format:
 
 ---
 
+## 2026-06-26 — C4: Polish — React 19, opt-in Langfuse tracing (C4)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+**What:** Quality-of-life polish. **React 19** — `ui/package.json` bumped react/react-dom to ^19
+and `@types/react`/`@types/react-dom` to ^19; `npm install` + `npm run build` (tsc + vite) clean,
+215 modules, no source changes needed (the existing `createRoot` + `useSSE` cleanup are already
+React-19-safe). **Langfuse tracing** — new `integrations/langfuse_tracer.py`: opt-in (`LANGFUSE_HOST`
++ `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`) `trace_run()` (per-run trace) + `score_run()`
+(Evidence-Stack pass-rate as a Langfuse score); wired into `_execute_pipeline` at run start and the
+`evidence_built` point. Strictly opt-in + offline-safe: the SDK is never imported and every call is a
+no-op unless all three keys are set; all calls wrapped in try/except. `docs/LANGFUSE_SETUP.md`
+(self-hosted, Canada-resident, MIT) documents setup. `langfuse>=2.0` added to requirements as optional.
+**Files:** `ui/package.json` (React 19), `integrations/langfuse_tracer.py` (new), `api/main.py`
+(trace_run/score_run wiring), `docs/LANGFUSE_SETUP.md` (new), `requirements.txt` (langfuse optional),
+`PROGRESS.md`.
+**Verification:**
+- verify_agent_core 11/11 ✅ · verify_m0_loop 3/3 ✅ · verify_c2_observability 3/3 ✅
+- verify_c3_extensibility 3/3 ✅ · evals/ci_gate.py exit 0 ✅
+- `cd ui && npm install && npm run build` clean under React 19 (tsc + vite, 215 modules)
+- Langfuse disabled offline (`_enabled()` False; trace_run/score_run no-op, never import the SDK)
+**Notes:** The API-router split (`api/router/{runs,specs,webhooks}.py`) is **deferred** — it is a pure
+reorganisation with real regression risk against the 18-check suite and the live `_execute_pipeline`
+path, for no behaviour change. Recorded as a follow-up; the app stays runnable as-is. Langfuse sits
+alongside the M10 OTel hook (both opt-in, independent).
+
 ## 2026-06-26 — C3: Extensibility — ADO webhook triggers, Slack/Teams notify, per-app .pdlc config (C3)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 **What:** The integration layer that lets external systems drive Continuum and lets new apps
