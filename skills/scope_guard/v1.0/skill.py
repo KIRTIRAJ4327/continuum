@@ -4,16 +4,36 @@ business_mappings — no missing codes, no invented extras.
 
 Loaded via importlib.util.spec_from_file_location (never dotted imports).
 Offline-safe: pure Python, no network, no external deps.
+
+P0.2: when a BoxLite sandbox is injected, reads real files from the workdir
+instead of scanning the in-memory code dict. Fallback to text scan unchanged.
 """
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Matches short ALL-CAPS codes (2-10 chars) that appear as string literals in
 # dict-key / mapping / assignment positions:
 #   "BR":    'ACC':    "CURR" =    "DB",
 _MAPPING_KEY_RE = re.compile(r"""["']([A-Z][A-Z0-9_]{1,9})["']\s*[=:,]""")
+
+# Source file extensions to scan when reading from a live box workdir.
+_SOURCE_EXTS = {".py", ".ts", ".js", ".java", ".html", ".css", ".json"}
+
+
+def _discover_source_files(workdir: Path) -> List[Path]:
+    """Walk workdir, returning source files (skipping .git / __pycache__)."""
+    results = []
+    for p in workdir.rglob("*"):
+        if p.is_file() and p.suffix in _SOURCE_EXTS:
+            # Skip git internals and pycache
+            parts = p.parts
+            if ".git" in parts or "__pycache__" in parts:
+                continue
+            results.append(p)
+    return results
 
 
 def _check_scope(
@@ -50,12 +70,14 @@ def _check_scope(
 async def scope_guard(
     business_mappings: List[Dict[str, str]],
     code: Optional[Dict[str, str]] = None,
+    sandbox: Optional[Any] = None,  # P0.2: injected BoxLite (already in _INJECTED_PARAMS)
 ) -> Dict[str, Any]:
     """
     Offline-safe scope conformance check.
 
-    Scans generated code for mapping-like string literals (dict keys, enum values,
-    constants) that match the supplied business-mapping codes.
+    P0.2: when `sandbox` is present (BoxLite), reads real files from the workdir
+    instead of scanning the in-memory code dict — making "exact_match" a claim
+    about actual source files, not a text string.
 
     Returns:
       supplied        — codes provided at intent time
@@ -64,4 +86,17 @@ async def scope_guard(
       missing_in_code — supplied codes absent from generated code
       exact_match     — True iff missing and extra are both empty
     """
+    if sandbox is not None and hasattr(sandbox, "workdir"):
+        # P0.2: read real files from the box workdir
+        real_code: Dict[str, str] = {}
+        for fpath in _discover_source_files(sandbox.workdir):
+            try:
+                rel = str(fpath.relative_to(sandbox.workdir))
+                real_code[rel] = await sandbox.read(rel)
+            except Exception:  # noqa: BLE001
+                pass
+        if real_code:
+            return _check_scope(business_mappings, real_code)
+        # fallthrough if workdir was empty (no files written yet)
+
     return _check_scope(business_mappings, code or {})

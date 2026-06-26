@@ -16,6 +16,301 @@ Entry format:
 
 ---
 
+## 2026-06-24 — P0.2: Box Lite — per-agent isolated execution environment (P0.2)
+**Branch:** `feature/p02-box-lite`  ·  **Commit:** cdb001a (rebased onto dev)
+**What:** Adds `skills/sandbox/v1.0/skill.py` — the Box Lite ephemeral workdir for Tier-2
+developer agents (Database, Backend, Frontend, Security). Each run gets a per-agent isolated
+workdir backed by the host filesystem with real subprocess execution, real git diffs, and
+real exec evidence surfaced in the Evidence Stack. Zero new dependencies (stdlib only).
+The `orchestrator/agent_runner.py` automatically spins up a `BoxLite` instance for every
+Tier-2 role and tears it down after evidence extraction. `skills/scope_guard/v1.0/skill.py`
+now reads real files from the box workdir when a sandbox is injected. Evidence Stack layers 1+2
+are upgraded with real `ExecResult` stdout when BoxLite ran. Fixed the `sys.modules` registration
+issue in the skill loader so `@dataclass` types resolve correctly. Upgrade path: DockerBox →
+ACABox → HyperlightBox implement the same 5-method interface (`write/exec/diff/read/teardown`).
+**Files:** `skills/sandbox/v1.0/skill.py` (new), `orchestrator/agent_runner.py` (BoxLite init
++ sys.modules fix + evidence extraction), `skills/scope_guard/v1.0/skill.py` (real-file scan),
+`evals/evidence_stack.py` (P0.2 exec evidence + P1.1 gate independence merged),
+`scripts/verify_p02_boxlite.py` (new), `Makefile` (verify-p02 target), `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core: 11/11 ✅
+- verify_m0_loop: 3/3 ✅
+- verify_m3_learning: 6/6 ✅  · verify_m5_evolution: 6/6 ✅
+- verify_m6_workqueue: 6/6 ✅ · verify_m7_scope_guard: 2/2 ✅
+- verify_m8_repo_split: 3/3 ✅ · verify_m9_maf_pilot: 6/6 ✅
+- verify_m10_assert: 6/6 ✅
+- **verify_p02_boxlite: 4/4 ✅** (write+exec→rc0, failure→rc1, timeout→rc-1, teardown→gone)
+- evals/ci_gate.py: exit 0 ✅
+**Notes:** Local-exec BoxLite is intentionally the starting point — real sandbox hardening (no
+local-exec fallback in production) is a P0.2 follow-up requiring Hyper-V / ACA dynamic sessions.
+`CONTINUUM_TARGET_REPO` or `ctx.repo_path` still used as fallback when BoxLite is unavailable.
+
+## 2026-06-17 — P0.1: Durable Execution — run persistence layer (P0.1)
+**Branch:** `feature/p0-durable-execution`  ·  **Commit:** pending
+**What:** Adds `graph_db/run_store.py` `RunStore` — a two-tier persistence layer for
+`ContinuumState`. Tier 1 (live): asyncpg-based Postgres upserts after every human-gate
+suspension and at pipeline completion, so runs survive a process restart. Tier 2
+(offline default): the module-level `_MEMORY` dict, which `api/main._RUNS` is now an
+alias of — same object, no copy, no behaviour change for the verify suite. On startup,
+`restore_active()` reloads non-terminal runs from Postgres. Any Postgres error degrades
+silently to in-memory. Also fixes `ContinuumGraph._run_agent()` to create a per-run
+`AgentContext` (was using a shared context, unsafe for concurrent runs).
+**Files:** `graph_db/run_store.py` (new), `api/main.py` (RunStore wiring), `orchestrator/graph.py` (per-run context fix), `scripts/verify_p0_durable_execution.py` (new), `Makefile`, `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core: 11/11 ✅
+- verify_m0_loop: 3/3 ✅ (unchanged — _execute_pipeline and _RUNS behaviour identical)
+- verify_m11_spec_registry: 4/4 ✅ · verify_m12_compliance: 3/3 ✅
+- verify_m13_state_machine: 6/6 ✅ · verify_p1_gate_independence: 6/6 ✅
+- **verify_p0_durable_execution: 4/4 ✅**
+- evals/ci_gate.py: exit 0 ✅
+**Notes:** Execution path switch (use `ContinuumGraph.run()` instead of `_execute_pipeline`) is the P0.1 follow-up — requires LangGraph checkpointer suspend/resume and resolves the mid-run state gap. `POSTGRES_DSN` env var activates the Postgres tier.
+
+## 2026-06-14 — P1.1: Gate Independence (resolves OQ-3) (P1.1)
+**Branch:** `feature/p1-gate-independence` (stacked on `feature/m13-state-machine`)  ·  **Commit:** pending
+
+**What:** Implemented P1.1 from the production-readiness track — splitting the
+combined `local_verify` gate into three INDEPENDENT gates (`gate_lint`,
+`gate_typecheck`, `gate_test`), each with its own pass/fail and its own evidence
+record. This makes the Evidence Stack's "6 independent signals" literally true
+(**resolves OQ-3**) and makes M12's compliance claims defensible. Single-run design:
+`gate_local_verify_split()` runs each gate once and is the source of truth; the
+DEVELOPER path records all three `GateStatus`es plus a derived composite
+`local_verify` (so the live retry loop, graph routing, and M13 quality gate — all of
+which key on `local_verify` — are unchanged). The Evidence Stack now reads layer 1
+(build = lint+typecheck) and layer 2 (regression = test) from *different* signals
+when the split gates exist, falling back to `local_verify` for pre-P1.1 states
+(byte-unchanged). Each gate keeps its `py_compile` offline fallback. Per-gate retry
+*budgets* in the live loop remain a follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/gates.py` — new `gate_lint` / `gate_typecheck` / `gate_test` /
+  `gate_local_verify_split`; `gate_local_verify` refactored to the composite
+  aggregate; `_pycompile` helper. `_python_targets` unchanged.
+- `orchestrator/agent_runner.py` — DEVELOPER branch runs the split once, records the
+  three sub-gates + the composite (single tool run, no double-execution).
+- `evals/evidence_stack.py` — layers 1 & 2 read independent gates when present
+  (`_combine_status` / `_combine_detail`), else fall back to `local_verify`; sublabels
+  updated; 6-layer shape and keys unchanged.
+- `scripts/verify_m0_loop.py` — patches `gate_local_verify_split` (the new source of
+  truth) instead of the composite; same retry/escalation behaviour, still 3/3.
+- `scripts/verify_p1_gate_independence.py` (new, 6/6) + `Makefile` `verify-p1`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Gate-system section
+  rewrite, P1.1 invariant, OQ-3 marked resolved, badges, verification matrix,
+  production-readiness P1.1 → shipped.
+
+**Verification:** all suites green, zero credentials:
+- M0–M13 suites all pass (notably `verify_m0_loop` 3/3 after the patch-target change,
+  `verify_m6_workqueue` 6/6, `verify_m10_assert` 6/6 — Evidence Stack shape intact)
+- `verify_p1_gate_independence.py` → **6/6** · `evals/ci_gate.py` → exit 0 · `import api.main` OK.
+
+**Notes / follow-ups:** This is the offline-verifiable slice of P1. The remaining P0
+work (durable execution, sandbox, auth/tenancy) and P1.2 observability touch the live
+path / external services and are not offline-verifiable. Recommended next: **P0.3
+auth/tenancy** (the gate for real-client use) or **P0.1 durable execution** (which is
+also where the M13 policy engine becomes the live gating mechanism).
+
+---
+
+## 2026-06-14 — M13: 15-State SDLC Machine + Policy Engine (M13)
+**Branch:** `feature/m13-state-machine` (stacked on `feature/m12-compliance`)  ·  **Commit:** pending
+
+**What:** Implemented M13 from `Continuum-PRD-v3.0.md` §8 — the first Frontier
+milestone (unblocked now M11+M12 shipped). The SDLC lifecycle is now an explicit,
+policy-governed graph instead of being implicit in routing code. `state_machine.py`
+**declares** the 15 states (`NEW → … → CLOSED`), each with entry criteria
+(`required_artifacts` + `quality_gates`), allowed `forward`/`returns` edges, and the
+four named human gates (`TRANSITION_GATES`: G1 NEW→EPIC_APPROVED, G2 ARCH_READY→
+IMPL_READY, G3 RELEASE_READY→DEPLOYED, G4 IN_PRODUCTION→IN_PROGRESS incident return).
+`policy_engine.py` **enforces** it: `can_transition(artifact, from, to) -> (ok,
+reason)` is a pure predicate (edge → gate → artifacts → quality gates), and
+`advance()` mutates `lifecycle_state` only when permitted. Return/exception edges
+(tests-fail, security-findings, prod-incident) are first-class. The live
+`_execute_pipeline()` path is **deliberately unchanged** — `lifecycle_state` is the
+new `ContinuumState` field (system of record) and the API surfaces a read-only value
+via `derive_lifecycle_state()`; existing story/design/merge approvals map to G1/G2/G3.
+Wiring the policy engine as the live *gating* mechanism (replacing `_route()`) is a
+follow-up tied to P0.1.
+
+**Files:**
+- `orchestrator/state_machine.py` (new) — `SDLCState` (15), `Gate` (G1–G4),
+  `GATE_INFO`/`GATE_APPROVAL_FIELD`, `StateDefinition`, `STATE_MACHINE`,
+  `TRANSITION_GATES`, introspection helpers (`all_states`, `forward_path`,
+  `gate_for_transition`, …) and `derive_lifecycle_state`. Pure data; zero orchestrator
+  imports so `state.py` can import `SDLCState` cycle-free.
+- `orchestrator/policy_engine.py` (new) — `can_transition`, `advance` (pure, read
+  artifact via getattr).
+- `orchestrator/state.py` — `lifecycle_state: SDLCState = NEW` + `incident_approved`.
+- `api/main.py` — read-only `lifecycle_state` in the run serializer via a guarded
+  `_lifecycle_state()` helper.
+- `scripts/verify_m13_state_machine.py` (new, 6/6) + `Makefile` `verify-m13`.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, state-machine
+  architecture section, M13 invariant, badges, timeline, verification matrix
+  (M13 moved roadmap → shipped; only M14 remains roadmap).
+
+**Verification:** all suites green, zero credentials:
+- M0–M12 suites all pass (`verify_agent_core` 11/11 … `verify_m12_compliance` 3/3)
+- `verify_m13_state_machine.py` → **6/6** · `evals/ci_gate.py` → exit 0 (no regression)
+- `import api.main` + `orchestrator.{state,state_machine,policy_engine}` OK.
+
+**Notes / follow-ups:** The live pipeline is unchanged this milestone (lifecycle is
+surfaced, not yet enforced) — making `policy_engine` the live gating path (refactor
+`_route()` / `_execute_pipeline`) is the natural P0.1 companion. Next: **M14 MAF
+Graduation** (not offline-verifiable) or the **P0** production track.
+
+---
+
+## 2026-06-14 — M12: Compliance Report (M12)
+**Branch:** `feature/m12-compliance` (stacked on `feature/m11-spec-registry`)  ·  **Commit:** pending
+
+**What:** Implemented M12 from `Continuum-PRD-v3.0.md` §8 — the second Spine
+milestone, and **packaging, not new capability**. `api/compliance.py`
+`build_compliance_report(run_id, state, events=None)` assembles an auditor-readable
+artifact from data that already exists across the run state and event bus: 8
+always-present sections (run metadata, spec, business mappings, gate decisions,
+the 6-layer Evidence Stack, audit trail, harness/model versions, and a boolean
+compliance-assertions checklist). The `spec` section prefers the M11 Registry and
+falls back to work-item state. Honesty is built in: a blocked/returned run yields a
+*valid* report whose `compliance_assertions.passed` is truthfully `False`, and any
+absent data is an explicit `null`/`[]` carrying a `_missing_reason`, enumerated in
+`report["missing"]` — never silently omitted (`complete == missing == []`). Two
+endpoints: `GET /runs/{run_id}/compliance-report` (JSON) and `…/compliance-report.html`
+(`render_compliance_html`). Pure/offline: audit trail from the in-memory event bus,
+`git describe` + `config` are best-effort lazy lookups; reuses `build_evidence_stack`.
+
+**Files:**
+- `api/compliance.py` (new) — `build_compliance_report`, `render_compliance_html`,
+  `SECTION_ORDER`, the eight `_section_*` builders, `_collect_missing`, and
+  best-effort `_harness_version` / `_model_config` helpers.
+- `api/main.py` — `GET /runs/{run_id}/compliance-report` (+ `.html`); import +
+  `HTMLResponse`.
+- `scripts/verify_m12_compliance.py` (new, 3/3) + `Makefile` `verify-m12` target.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Compliance Report
+  architecture section, M12 invariant, badges, timeline, verification matrix
+  (M12 moved roadmap → shipped).
+
+**Verification:** all suites green, zero credentials:
+- `verify_agent_core.py` (11/11) · `verify_m0_loop.py` (3/3) · `verify_m3_learning.py` (6/6)
+- `verify_m5_evolution.py` · `verify_m6_workqueue.py` · `verify_m7_scope_guard.py` (2/2)
+- `verify_m8_repo_split.py` (3/3) · `verify_m9_maf_pilot.py` (6/6) · `verify_m10_assert.py` (6/6)
+- `verify_m11_spec_registry.py` (4/4) · `verify_m12_compliance.py` → **3/3**
+- `evals/ci_gate.py` → exit 0 (no regression) · `import api.main` OK.
+
+**Notes / follow-ups:** Approver identity + approval timestamps are explicit nulls
+with a reason (`pending auth, P0.3`) — they become real once auth lands. The audit
+trail reads the in-memory event bus; the durable-Postgres source is a P-track
+concern. Branch is stacked on M11 (PR #16) — merge M11 first, then this PR shows a
+clean M12-only diff. Next: **M13 15-State Machine** (Frontier, gated on M11+M12,
+now both shipped) or the **P0** production track.
+
+---
+
+## 2026-06-14 — M11: Spec Registry (M11)
+**Branch:** `feature/m11-spec-registry`  ·  **Commit:** pending
+
+**What:** Implemented M11 from `Continuum-PRD-v3.0.md` §8 — the first Spine
+milestone. A spec no longer dies with its run: the **Spec Registry** is a
+persistent, versioned, append-only store of the agreed spec per *component*
+(a deterministic slug). On a run, the BSA retrieves the prior current spec for the
+component **before** drafting (`query_spec_registry`), then persists this run's spec
+as a new version (`write_spec_registry`), recording a `SUPERSEDES` link + reason when
+the body materially differs. The M7 scope-guard gained a Registry-conformance branch:
+a run whose spec drifts from the Registry's current spec **without** a recorded
+supersession is red (the branch only fires when a prior spec exists, so M0–M10 runs
+are byte-unchanged). New read-only endpoints expose the version chain. Fully
+offline-safe: a module-level `_IN_MEMORY_SPECS` store gives cross-run persistence with
+no Neo4j; the live Neo4j path runs only when a *connected* driver is passed.
+
+**Files:**
+- `graph_db/spec_registry.py` (new) — `write_spec`, `get_current_spec`,
+  `get_spec_history`, `mark_superseded`, `list_components`, `specs_match` (shared
+  conformance predicate), `_is_live`, `_reset_registry`. Three-tier fallback mirrors
+  the M3 driver; live Cypher guarded so it never breaks offline.
+- `orchestrator/component.py` (new) — `component_slug(request, story)`, deterministic.
+- `skills/query_spec_registry/v1.0/skill.py` + `skills/write_spec_registry/v1.0/skill.py`
+  (new) — distinct from the existing `write_spec` formatter skill; offline-safe, never raise.
+- `orchestrator/agent_runner.py` — BSA offline path retrieves+persists the Registry
+  spec; `apply_agent_output` stores `component`, `registry_specs`,
+  `registry_current_before`, `spec_superseded`.
+- `orchestrator/state.py` — four M11 fields.
+- `orchestrator/gates.py` — `gate_scope_conformance` restructured: M7 mapping check +
+  M11 Registry-conformance check; M7 messages/behaviour preserved exactly.
+- `api/main.py` — `GET /specs`, `GET /specs/{component}`; BSA artifact view + state
+  serializer surface M11 fields; step-2.5 guard widened to fire on a prior spec.
+- `agents/bsa.yaml` — two new allowed_skills.
+- `scripts/verify_m11_spec_registry.py` (new) + `Makefile` `verify-m11` target.
+- `CLAUDE.md` / `README.md` — non-negotiable rules, commands, Spec Registry
+  architecture section, M11 invariant, badges, timeline, verification matrix
+  (M11 moved from roadmap → shipped).
+
+**Verification:** all suites green, zero credentials:
+- `verify_agent_core.py` → ALL PASS (11/11) · `verify_m0_loop.py` → ALL PASS (3/3)
+- `verify_m3_learning.py` → 6/6 · `verify_m5_evolution.py` → OK · `verify_m6_workqueue.py` → OK
+- `verify_m7_scope_guard.py` → 2/2 · `verify_m8_repo_split.py` → 3/3
+- `verify_m9_maf_pilot.py` → 6/6 · `verify_m10_assert.py` → 6/6
+- `verify_m11_spec_registry.py` → **4/4** · `evals/ci_gate.py` → exit 0 (no regression)
+- End-to-end smoke: two BSA runs on the same request → run 2 grounded on run 1's v1,
+  filed v2; `list_components` shows current_version=2.
+
+**Notes / follow-ups:** Identical specs across runs still create a new (non-superseding)
+version — intentional per-run audit trail; supersession only fires on material diff.
+Live Neo4j reads from the API endpoints require a *connected* driver (offline uses the
+module store) — wiring a connected driver is a P-track concern. Next Spine milestone:
+**M12 Compliance Report**, which can reuse `build_evidence_stack` + the Registry spec.
+
+---
+
+## 2026-06-14 — PRD v3.0 adoption + M11–M14 / P0–P2 roadmap docs (docs)
+**Branch:** `feature/prd-v3-roadmap-docs`  ·  **Commit:** pending
+
+**What:** Adopted **PRD v3.0** (supersedes v2.2) and documented the forward roadmap.
+Docs-only — no behaviour change, no new milestone code. v3.0 reframes the project:
+M0–M10 are the *delivered baseline*; M11–M14 (Spec Registry, Compliance Report,
+15-State Machine, MAF Graduation) are a sequenced **feature track** (Spine M11–M12
+shippable now, Frontier M13–M14 gated on them). Also folded in a user-requested
+**production-readiness track (P0–P2)**: five gaps between "sound POC" and "system a
+bank can run" — P0 durable execution / sandbox hardening / auth+tenancy, P1 gate
+independence / observability / M12, P2 M11 / M13 / Hyperlight / concurrency. The
+honest reframe carried into the docs: P0 hardening (esp. P0.1 wiring `ContinuumGraph`
++ Postgres checkpointer as the live path, retiring in-memory `_RUNS`) precedes the
+feature milestones; OQ-3 (Evidence Stack layers 1+2 are the same `gate_local_verify`)
+is resolved only by P1.1's gate split; M14/Hyperlight are explicitly not
+offline-verifiable. The non-negotiable verify list was deliberately **not** extended
+with M11–M14 scripts (they don't exist yet).
+
+**Files:**
+- `Continuum-PRD-v3.0.md` (new) — full PRD v3.0 verbatim; `Continuum-Agentic-SDLC-PRD.md`
+  (v2.2) retained as superseded history.
+- `README.md` — milestone badge `M0–M10_Shipped` + new `Roadmap` badge; timeline
+  extended with 🔜 M11–M14 rows; new "🧭 Roadmap" section (feature track table +
+  production-readiness P0–P2 table + honesty notes); verification matrix gains a
+  "Planned (M11–M14)" sub-list clearly marked *not implemented*; doc table adds the
+  v3.0 row (v2.2 relabelled superseded); doc badge → PRD v3.0.
+- `CLAUDE.md` — PRD v3.0 pointer in intro; new "Roadmap (M11–M14)" + "Production
+  Readiness (P0–P2)" sections as implementing-session guard-rails (mirror Neo4jDriver
+  3-tier fallback for M11, distinct from the existing `write_spec` skill, etc.).
+- `PROGRESS.md` — this entry.
+
+**Verification:** docs-only, so the bar is "nothing regressed". Full offline suite
+re-run, all green:
+- `verify_agent_core.py` → ALL PASS (11/11)
+- `verify_m0_loop.py` → ALL PASS (3/3)
+- `verify_m3_learning.py` → ALL PASS (6/6)
+- `verify_m5_evolution.py` → OK (6/6)
+- `verify_m6_workqueue.py` → OK (6/6)
+- `verify_m7_scope_guard.py` → 2/2
+- `verify_m8_repo_split.py` → 3/3
+- `verify_m9_maf_pilot.py` → 6/6
+- `verify_m10_assert.py` → 6/6
+- `evals/ci_gate.py` → exit 0 (no regression)
+
+**Notes / follow-ups:** Recommended next implementation is **P0.1 durable execution**
+(highest-leverage, internal-only) per the production track, or **M11 Spec Registry**
+per the feature track — a detailed M11 design exists from this session's planning
+(spec_registry driver methods, two new skills, scope-guard extension, 4/4 verify).
+Each milestone is its own feature branch → PR to `dev` (PRD §12).
+
+---
+
 ## 2026-06-14 — M10: ASSERT / Rubric Eval Integration (M10)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 

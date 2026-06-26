@@ -165,6 +165,7 @@ def load_skill(name: str) -> Optional[Callable]:
             try:
                 spec = importlib.util.spec_from_file_location(f"continuum_skill_{name}", skill_file)
                 module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+                import sys as _sys; _sys.modules[f"continuum_skill_{name}"] = module  # noqa: E702 — @dataclass __module__ lookup
                 spec.loader.exec_module(module)  # type: ignore[union-attr]
                 fn = getattr(module, name, None)
             except Exception as exc:  # noqa: BLE001 - skill load must never crash a run
@@ -526,6 +527,26 @@ async def _run_offline(
         if past_episodes:
             result["episodes"] = past_episodes
             logger.info("[BSA] Grounded on %d past episode(s) via GraphRAG", len(past_episodes))
+
+        # M11: Spec Registry — retrieve the prior agreed spec for this component
+        # BEFORE drafting context is finalized, then persist this run's spec as a
+        # new version (recording a supersession if it materially differs).
+        from orchestrator.component import component_slug
+        component = component_slug(state.request, story)
+        registry = await _call(skills.get("query_spec_registry"), ctx, state, component=component) or {}
+        prior = registry.get("current")
+        write_res = await _call(
+            skills.get("write_spec_registry"), ctx, state,
+            component=component, spec_body=spec, request=state.request,
+            run_id=state.run_id or "", prior_spec=prior,
+            supersedes_reason=f"Run {state.run_id or 'n/a'} updated spec for {component}",
+        ) or {}
+        result["component"] = component
+        result["registry_specs"] = registry.get("history", [])
+        result["registry_current_before"] = prior
+        result["spec_superseded"] = write_res.get("superseded")
+        if prior is not None:
+            logger.info("[BSA] M11: grounded on Registry spec v%s for %s", prior.get("version"), component)
         return result
 
     if role == AgentRole.ARCHITECT.value:
@@ -775,6 +796,13 @@ def apply_agent_output(state: ContinuumState, role: str, data: dict) -> None:
         # M3: store past episodes retrieved by GraphRAG.
         if data.get("episodes") is not None:
             state.episodes = data["episodes"]
+        # M11: Spec Registry results.
+        if data.get("component"):
+            state.component = data["component"]
+        if data.get("registry_specs") is not None:
+            state.registry_specs = data["registry_specs"]
+        state.registry_current_before = data.get("registry_current_before")
+        state.spec_superseded = data.get("spec_superseded")
 
     elif role == AgentRole.ARCHITECT.value:
         contract = data.get("contract")
@@ -861,10 +889,18 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
 
     if role == AgentRole.DEVELOPER.value:
         target = _sandbox_or_local_path(state, ctx)
-        passed, output = await gates.gate_local_verify(target)
-        gates.update_gate_status(state, "local_verify", passed, output)
-        await _gate_event("local_verify", passed, output)
-        logger.info("[GATE] local_verify=%s (%s)", "green" if passed else "red", target)
+        # P1.1: run the three independent gates once, record each as its own
+        # evidence, then derive the composite `local_verify` the retry loop keys on.
+        split = await gates.gate_local_verify_split(target)
+        for gname, (ok, out) in split.items():
+            gates.update_gate_status(state, gname, ok, out)
+        passed = all(ok for ok, _ in split.values())
+        combined = "; ".join(
+            f"{name}={'green' if ok else 'red'}" for name, (ok, _) in split.items()
+        )
+        gates.update_gate_status(state, "local_verify", passed, combined)
+        await _gate_event("local_verify", passed, combined)
+        logger.info("[GATE] local_verify=%s (%s) [%s]", "green" if passed else "red", target, combined)
 
     elif role == AgentRole.SECURITY.value:
         target = _sandbox_or_local_path(state, ctx)
@@ -1153,12 +1189,12 @@ export interface PaginatedResponse<T> {{
 
 def _sandbox_or_local_path(state: ContinuumState, ctx: AgentContext) -> str:
     """
-    Resolve where the dev/security gate should look.
-
-    M0: if the developer wrote files to state.code, they haven't been
-    materialised on disk, so the gate runs against the repo (ctx.repo_path).
-    Real sandbox execution will replace this with a sandbox workspace path.
+    P0.2: if a BoxLite (or any sandbox with a .workdir) is active, return its
+    path so gates run against real generated files.  Falls back to ctx.repo_path
+    for Tier-1 agents and offline paths without an active box.
     """
+    if ctx.sandbox is not None and hasattr(ctx.sandbox, "workdir"):
+        return str(ctx.sandbox.workdir)
     return ctx.repo_path or "."
 
 
@@ -1185,6 +1221,35 @@ async def run_agent(
     run_id = ctx.run_id or (state.run_id or "")
     started = time.time()
     logger.info("[%s] Starting agent run", role.upper())
+
+    # P0.2: spin up BoxLite for Tier-2 developer agents when no sandbox supplied.
+    _TIER2_ROLES = {
+        AgentRole.DATABASE.value,
+        AgentRole.BACKEND.value,
+        AgentRole.FRONTEND.value,
+        AgentRole.SECURITY.value,
+    }
+    _owned_box = False
+    if role in _TIER2_ROLES and ctx.sandbox is None:
+        try:
+            from dataclasses import replace as _dc_replace
+            import importlib.util as _ilu
+            _BoxLite = None
+            _sdir = _SKILLS_DIR / "sandbox"
+            _vdir = _latest_version_dir(_sdir)
+            if _vdir:
+                _sspec = _ilu.spec_from_file_location("continuum_skill_sandbox", _vdir / "skill.py")
+                _smod = _ilu.module_from_spec(_sspec)  # type: ignore[arg-type]
+                import sys as _sys
+                _sys.modules["continuum_skill_sandbox"] = _smod  # needed for @dataclass __module__ lookup
+                _sspec.loader.exec_module(_smod)  # type: ignore[union-attr]
+                _BoxLite = getattr(_smod, "BoxLite", None)
+            if _BoxLite is not None:
+                ctx = _dc_replace(ctx, sandbox=_BoxLite(run_id=run_id or "offline", agent=role))
+            _owned_box = True
+            logger.info("[%s] BoxLite workdir: %s", role.upper(), ctx.sandbox.workdir)
+        except Exception as _box_exc:  # noqa: BLE001
+            logger.debug("[%s] BoxLite unavailable (%s) — text path", role.upper(), _box_exc)
 
     # --- Emit agent_start ---
     if run_id:
@@ -1235,6 +1300,33 @@ async def run_agent(
             logger.error("[%s] Offline fallback also failed: %s", role.upper(), exc2)
             state.error_message = f"{role} failed: {exc2}"
             data = {}
+
+    # P0.2: extract diff + exec evidence from BoxLite before teardown.
+    if _owned_box and ctx.sandbox is not None:
+        try:
+            diff_text = await ctx.sandbox.diff()
+            if diff_text and not data.get("diff"):
+                data["diff"] = diff_text
+            # Store ExecResult evidence for Evidence Stack layers 1+2.
+            suite = getattr(ctx.sandbox, "_last_suite", None)
+            if suite:
+                state.gates = getattr(state, "gates", []) or []
+                # Store as a dict keyed by role for evidence_stack to read.
+                if not hasattr(state, "_exec_evidence"):
+                    state._exec_evidence = {}
+                state._exec_evidence[role] = {
+                    step: {
+                        "returncode": r.returncode,
+                        "stdout": r.stdout[:2000],
+                        "stderr": r.stderr[:500],
+                        "duration_s": round(r.duration_s, 3),
+                    }
+                    for step, r in suite.items()
+                }
+        except Exception as _ev_exc:  # noqa: BLE001
+            logger.debug("[%s] Evidence extraction error: %s", role.upper(), _ev_exc)
+        finally:
+            await ctx.sandbox.teardown()
 
     # M6: account for model cost before merging output (pop the private usage
     # key so it never leaks into apply_agent_output / artifacts).

@@ -310,8 +310,10 @@ class ContinuumGraph:
         return _node
 
     async def _run_agent(self, state: ContinuumState, agent: str) -> ContinuumState:
-        """Delegate to agent_runner.run_agent — load YAML, call LLM, bind skills."""
-        return await run_agent(state, agent, self.context)
+        """Delegate to agent_runner.run_agent — per-run context (safe for concurrent runs)."""
+        ctx = AgentContext.from_env()
+        ctx.run_id = state.run_id or ""
+        return await run_agent(state, agent, ctx)
 
     # ---------------------------------------------------------------------- #
     # Conditional edge

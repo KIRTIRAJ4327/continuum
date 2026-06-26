@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from orchestrator.agent_runner import AgentContext, run_agent
@@ -32,6 +32,9 @@ from orchestrator.gates import gate_scope_conformance, update_gate_status
 from orchestrator.pdlc import emit_pdlc_artifacts
 from orchestrator.state import AgentRole, ContinuumState
 from evals.evidence_stack import build_evidence_stack
+from api.compliance import build_compliance_report, render_compliance_html
+from orchestrator.state_machine import derive_lifecycle_state
+from graph_db.run_store import RunStore, _MEMORY as _RUNS
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +42,22 @@ app = FastAPI(title="Continuum", version="0.2.0")
 
 
 @app.on_event("startup")
-async def validate_env() -> None:
+async def startup() -> None:
     """
-    Warn about missing optional env vars at startup.
+    Initialise the run store and restore active runs.
 
-    The server ALWAYS starts — even without any credentials — because the
-    offline/stub path handles all cases.  This validator only logs warnings so
-    operators know which integrations are in stub mode.
+    P0.1: creates a RunStore backed by Postgres when POSTGRES_DSN is set; falls
+    back to the in-memory _MEMORY dict otherwise (identical to pre-P0.1 behaviour).
+    On a Postgres restart, active runs are reloaded from the last checkpoint.
+
+    Also validates optional env vars (offline stub mode warnings).
     """
+    global _STORE
+    dsn = os.getenv("POSTGRES_DSN", "").strip()
+    _STORE = await RunStore.create(dsn=dsn or None)
+    if dsn:
+        await _STORE.restore_active()
+
     try:
         from config import warn_missing_optional, AZURE_AI_LIVE, AZURE_ADO_LIVE  # type: ignore
         missing = warn_missing_optional()
@@ -75,8 +86,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory run store. LangGraph PostgresCheckpointer replaces this in production.
-_RUNS: Dict[str, ContinuumState] = {}
+# P0.1: RunStore — Postgres-backed when POSTGRES_DSN is set, in-memory otherwise.
+# _RUNS is the module-level _MEMORY dict from run_store (same object, no copy).
+_STORE: Optional[RunStore] = None
 _MAX_RETRIES = 3
 
 
@@ -119,6 +131,14 @@ _STAGE_INDEX: Dict[str, int] = {
 _STAGE_COUNT = 8
 
 
+def _lifecycle_state(state: ContinuumState) -> str:
+    """M13: best-effort lifecycle state for the run (read-only, never raises)."""
+    try:
+        return derive_lifecycle_state(state)
+    except Exception:  # noqa: BLE001
+        return "new"
+
+
 def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
     """Serialise state for JSON responses."""
     return {
@@ -157,6 +177,9 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "business_mappings": getattr(state, "business_mappings", []) or [],
         "mapping_fidelity": getattr(state, "mapping_fidelity", None),
         "pdlc_path": getattr(state, "pdlc_path", None),
+        "component": getattr(state, "component", None),
+        "spec_superseded": getattr(state, "spec_superseded", None),
+        "lifecycle_state": _lifecycle_state(state),
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -264,6 +287,9 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
                 "run_id": run_id,
                 "data": {"gate_name": state.approval_gate_name},
             })
+            # P0.1: checkpoint at every human gate so the run survives a restart
+            if _STORE and run_id:
+                await _STORE.save(run_id, state)
 
     # 1. BSA → Architect → Planner (no retry gates on this stretch in M0)
     for role in ("bsa", "architect", "planner"):
@@ -303,10 +329,12 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             })
         logger.warning("local_verify red, retry %d/%d", gate.retry_count, _MAX_RETRIES)
 
-    # 2.5: M7 Scope-Guard gate — only when business_mappings were supplied and
-    # the developer chain succeeded (local_verify green or absent).
+    # 2.5: M7 Scope-Guard gate — runs when business_mappings were supplied OR a
+    # prior Registry spec exists for this component (M11 conformance), and the
+    # developer chain succeeded (local_verify green or absent).
     bm = getattr(state, "business_mappings", []) or []
-    if bm:
+    has_prior = getattr(state, "registry_current_before", None) is not None
+    if bm or has_prior:
         lv_check = _gate(state, "local_verify")
         if lv_check is None or lv_check.status == "green":
             sc_passed, sc_output = await gate_scope_conformance(state)
@@ -365,6 +393,10 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
             )
         except Exception as pdlc_exc:  # noqa: BLE001
             logger.warning("M8: emit_pdlc_artifacts failed (non-fatal): %s", pdlc_exc)
+
+    # P0.1: persist final state so runs survive a process restart.
+    if _STORE and run_id:
+        await _STORE.save(run_id, state)
 
     if run_id:
         await event_bus.emit(run_id, {
@@ -430,6 +462,9 @@ async def list_runs() -> List[Dict[str, Any]]:
 @app.get("/run/{run_id}")
 async def get_run(run_id: str) -> Dict[str, Any]:
     state = _RUNS.get(run_id)
+    if state is None and _STORE is not None:
+        # P0.1: try to load from Postgres (run started in a previous process)
+        state = await _STORE.load(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}
@@ -486,7 +521,12 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
     artifacts: Dict[str, Any] = {}
     role = agent.lower()
     if role == AgentRole.BSA.value:
-        artifacts = {"story": state.story}
+        artifacts = {
+            "story": state.story,
+            "component": state.component,
+            "registry_specs": state.registry_specs,
+            "spec_superseded": state.spec_superseded,
+        }
     elif role == AgentRole.ARCHITECT.value:
         artifacts = {
             "contract": state.contract,
@@ -512,6 +552,29 @@ async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"unknown agent '{agent}'")
 
     return {"run_id": run_id, "agent": agent, "artifacts": artifacts}
+
+
+@app.get("/specs")
+async def list_specs() -> Dict[str, Any]:
+    """M11: list components in the Spec Registry with their current version."""
+    from graph_db import spec_registry
+    return {"components": spec_registry.list_components()}
+
+
+@app.get("/specs/{component}")
+async def get_spec_chain(component: str) -> Dict[str, Any]:
+    """M11: return the version chain (history + current) for a component."""
+    from graph_db import spec_registry
+    history = await spec_registry.get_spec_history(component)
+    current = await spec_registry.get_current_spec(component)
+    if not history and current is None:
+        raise HTTPException(status_code=404, detail=f"no specs for component '{component}'")
+    return {
+        "component": component,
+        "current": current,
+        "history": history,
+        "versions": len(history),
+    }
 
 
 @app.post("/run/{run_id}/resume")
@@ -678,6 +741,25 @@ async def get_evidence(run_id: str) -> Dict[str, Any]:
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     return {"run_id": run_id, "evidence": build_evidence_stack(state)}
+
+
+@app.get("/runs/{run_id}/compliance-report")
+async def get_compliance_report(run_id: str) -> Dict[str, Any]:
+    """M12: structured, auditor-readable compliance artifact for a run (JSON)."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    return build_compliance_report(run_id, state)
+
+
+@app.get("/runs/{run_id}/compliance-report.html", response_class=HTMLResponse)
+async def get_compliance_report_html(run_id: str) -> HTMLResponse:
+    """M12: the same compliance report rendered as a standalone HTML page."""
+    state = _RUNS.get(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    report = build_compliance_report(run_id, state)
+    return HTMLResponse(content=render_compliance_html(report))
 
 
 @app.get("/health")

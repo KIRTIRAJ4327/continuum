@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
 
+from orchestrator.state_machine import SDLCState
+
 
 class AgentRole(str, Enum):
     ORCHESTRATOR = "orchestrator"
@@ -113,6 +115,21 @@ class ContinuumState:
     # Absolute path of the .pdlc/ directory written into the target app repo.
     # Set after emit_pdlc_artifacts() runs; None if CONTINUUM_TARGET_REPO is unset.
     pdlc_path: Optional[str] = None
+
+    # M11: Spec Registry
+    # Deterministic component key this run's spec is filed under.
+    component: Optional[str] = None
+    # Version chain (oldest-first) the BSA retrieved from the Registry this run.
+    registry_specs: List[Dict[str, Any]] = field(default_factory=list)
+    # The prior current Registry spec for this component (None on a first run).
+    registry_current_before: Optional[Dict[str, Any]] = None
+    # {old_id, reason} when this run's spec superseded the prior one; else None.
+    spec_superseded: Optional[Dict[str, Any]] = None
+
+    # M13: 15-State SDLC lifecycle (the artifact's system of record).
+    lifecycle_state: "SDLCState" = field(default=SDLCState.NEW)
+    # G4 (Critical Incident Approval) grant — return edge IN_PRODUCTION → IN_PROGRESS.
+    incident_approved: bool = False
 
     # Metadata
     run_id: Optional[str] = None

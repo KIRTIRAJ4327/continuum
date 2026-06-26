@@ -21,6 +21,8 @@ allowed_skills:
   - write_spec
   - graphrag_query
   - web_research
+  - query_spec_registry
+  - write_spec_registry
 
 memory_scope: "request-scoped"
 temperature: 0.7

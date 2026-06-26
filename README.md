@@ -36,7 +36,12 @@
 [![Repo Split Tests](https://img.shields.io/badge/RepoSplit_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![MAF Pilot Tests](https://img.shields.io/badge/MAF_Pilot_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![ASSERT Eval Tests](https://img.shields.io/badge/ASSERT_Eval_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M10_Complete-7C3AED?style=flat-square)]()
+[![Spec Registry Tests](https://img.shields.io/badge/SpecRegistry_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Compliance Tests](https://img.shields.io/badge/Compliance_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![State Machine Tests](https://img.shields.io/badge/StateMachine_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Gate Independence Tests](https://img.shields.io/badge/GateIndependence_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_+_P1.1-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -487,6 +492,117 @@ Proven offline in `scripts/verify_m10_assert.py` → 6/6 PASS.
 
 ---
 
+## ✅ Spec Registry (M11)
+
+A spec no longer dies with its run. The **Spec Registry** is a persistent,
+versioned, append-only store of the agreed spec per **component** — so run N+1
+grounds on run N's decisions and architectural drift becomes detectable.
+
+```
+orchestrator/component.py    component_slug(request, story)  # deterministic key
+graph_db/spec_registry.py    write_spec · get_current_spec · get_spec_history ·
+                             mark_superseded · specs_match    # pure, offline
+  three-tier fallback:  live Neo4j  →  module _IN_MEMORY_SPECS  →  Python lookups
+```
+
+- **BSA grounds + persists** — `query_spec_registry` retrieves the prior current
+  spec *before* drafting; `write_spec_registry` files this run's spec as a new
+  version, recording a `SUPERSEDES` link when it materially differs.
+- **Append-only versioning** — no in-place edits; a different spec creates a new
+  version that supersedes the old (which flips to `status=superseded` + reason).
+- **Scope-guard extends to the Registry** — `gate_scope_conformance` now reds a run
+  whose spec drifts from the Registry's current spec *without* a recorded
+  supersession. The check only fires when a prior spec exists, so M0–M10 is unchanged.
+- **`GET /specs`** lists components; **`GET /specs/{component}`** returns the version
+  chain.
+
+Proven offline in `scripts/verify_m11_spec_registry.py` → 4/4 PASS.
+
+---
+
+## ✅ Compliance Report (M12)
+
+For a regulated customer, "the pipeline ran and tests passed" is not evidence — a
+structured, auditor-readable artifact is. `GET /runs/{run_id}/compliance-report`
+packages a completed run into **8 always-present sections**:
+
+```
+api/compliance.py  build_compliance_report(run_id, state) -> dict   # pure, offline
+  1 run_metadata          intent · component · lead time · cost · status
+  2 spec                  Gate-1 spec (M11 Registry, else work-item state)
+  3 business_mappings     D11 mappings + scope-guard conformance
+  4 gate_decisions        human G1/G2 + every automated gate
+  5 evidence_stack        the 6-layer Evidence Stack (reused)
+  6 audit_trail           chronological event log
+  7 versions              harness (git describe) + model mode/tiers
+  8 compliance_assertions boolean checklist + overall passed
+```
+
+- **Honest, not optimistic** — a blocked/returned run still yields a *valid* report;
+  its `compliance_assertions.passed` is truthfully `False`.
+- **Nothing silently omitted** — absent data is an explicit `null`/`[]` with a
+  `_missing_reason`, enumerated in `report["missing"]` (`complete == missing == []`).
+- **JSON + HTML** — `…/compliance-report` and `…/compliance-report.html`.
+
+Proven offline in `scripts/verify_m12_compliance.py` → 3/3 PASS.
+
+---
+
+## ✅ 15-State SDLC Machine (M13)
+
+The lifecycle is no longer implicit in routing code — it is an explicit,
+policy-governed graph. **Policies, not agents, decide transitions.**
+
+```
+NEW → EPIC_APPROVED → STORIES_READY → ARCH_READY → IMPL_READY → IN_PROGRESS
+    → CODE_COMPLETE → TESTING → TESTS_PASSED → SECURITY_REVIEW → SECURITY_APPROVED
+    → RELEASE_READY → DEPLOYED → IN_PRODUCTION → CLOSED
+
+orchestrator/state_machine.py   declares: 15 states · entry criteria · forward +
+                                return edges · G1–G4 gates · SLAs   (pure data)
+orchestrator/policy_engine.py   enforces: can_transition(artifact, from, to)
+                                          -> (ok, reason)            (pure predicate)
+```
+
+- **Four named human gates** govern exactly their edges — **G1** Business
+  (NEW→EPIC_APPROVED), **G2** Architecture (ARCH_READY→IMPL_READY), **G3** Release
+  (RELEASE_READY→DEPLOYED), **G4** Critical Incident (IN_PRODUCTION→IN_PROGRESS).
+- **Return edges are first-class** — tests fail → `CODE_COMPLETE`, security findings
+  → `IN_PROGRESS`, prod incident → `IN_PROGRESS` (G4) — no ad-hoc exception paths.
+- **`can_transition()` blocks with a reason** — undeclared edge, missing artifact,
+  ungranted gate, or a quality gate that isn't green.
+- **`lifecycle_state`** is the artifact's system of record; the live pipeline is
+  unchanged and surfaces it read-only via `derive_lifecycle_state()`.
+
+Proven offline in `scripts/verify_m13_state_machine.py` → 6/6 PASS.
+
+---
+
+## ✅ Gate Independence (P1.1)
+
+The combined `local_verify` gate is split into **three independent gates** — so the
+Evidence Stack's "6 independent signals" is literally true (resolves **OQ-3**) and
+the M12 compliance claims are defensible.
+
+```
+gate_lint        ruff      → py_compile (offline)   layer 1: Build / compile
+gate_typecheck   mypy      → py_compile (offline)   layer 1: + types
+gate_test        pytest    → py_compile (offline)   layer 2: Regression  (independent)
+
+gate_local_verify_split()  runs each once (single source of truth)
+gate_local_verify()        = AND of the three (backward-compatible composite)
+```
+
+- **Independent evidence** — the developer path records `lint` / `typecheck` / `test`
+  as their own `GateStatus`, plus the composite `local_verify` the retry loop keys on.
+- **Evidence Stack** — layer 1 (build) reads lint+typecheck, layer 2 (regression)
+  reads test; pre-P1.1 states fall back to `local_verify` (byte-unchanged).
+- **Offline-safe** — each gate degrades to `py_compile` on a thin environment.
+
+Proven offline in `scripts/verify_p1_gate_independence.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -521,8 +637,70 @@ M9 ──── MAF Harness Pilot · Backend agent on Microsoft Agent Framework
   │     ✅  opt-in, default-off · graceful fallback to LangChain loop · 6/6 PASS
   │
 M10 ─── ASSERT / Rubric Eval Integration · specs for Rules 1–9 + M7 scope
-        ✅  declarative machine-checkable rubrics · opt-in OTel export · 6/6 PASS
+  │     ✅  declarative machine-checkable rubrics · opt-in OTel export · 6/6 PASS
+  │
+M11 ─── Spec Registry · persistent versioned spec store · supersession chain
+  │     ✅  GET /specs/{component} · scope-guard extends to Registry · 4/4 PASS
+  │
+M12 ─── Compliance Report · structured audit artifact (EU AI Act / OSFI)
+  │     ✅  8 sections · reuses Evidence Stack · JSON + HTML · 3/3 PASS
+  │
+M13 ─── 15-State SDLC Machine · policy engine · G1–G4 named gates
+  ┊     ✅  can_transition() governs · return edges · lifecycle_state · 6/6 PASS
+  ┊
+M14 ┄┄┄ MAF Harness Graduation · all agents on MAF · Hyperlight sandbox
+        🔜 planned (Frontier) · gated on M13 · not offline-verifiable
 ```
+
+> ✅ = shipped & offline-verified · 🔜 = roadmap (not implemented). See the
+> **[Roadmap](#-roadmap)** for the feature track (M11–M14) and the
+> production-readiness track (P0–P2).
+
+---
+
+## 🧭 Roadmap
+
+Two parallel tracks. The **feature track** (M11–M14) follows PRD v3.0 §8. The
+**production-readiness track** (P0–P2) is the operational hardening that turns the
+POC into a system a regulated customer can run — and the honest reframe is that
+**P0 comes before the feature milestones**: durable execution, sandbox hardening,
+and auth/tenancy are prerequisites, with the feature milestones interleaved after.
+
+### Feature track (M11–M14)
+
+| Milestone | What it adds | Key new files | Gate-on |
+|---|---|---|---|
+| **M11** Spec Registry *(Spine)* ✅ **shipped** | Persistent, versioned spec store; BSA conforms-to-or-supersedes the current spec per component | `graph_db/spec_registry.py`, `skills/{query,write}_spec_registry`, `GET /specs/{component}` | M7 scope-guard |
+| **M12** Compliance Report *(Spine)* ✅ **shipped** | `GET /runs/{id}/compliance-report` (JSON + HTML) packaging spec + gate decisions + evidence + audit trail (EU AI Act / OSFI) | `api/compliance.py` | M11 |
+| **M13** 15-State Machine *(Frontier)* ✅ **shipped** | First-class state machine + `policy_engine.can_transition()`; G1–G4 named gates; `lifecycle_state` on the artifact | `orchestrator/state_machine.py`, `orchestrator/policy_engine.py` | M11+M12 |
+| **M14** MAF Graduation *(Frontier)* | All agents on MAF harness primitives; Hyperlight CodeAct sandbox; Agent Optimizer feeding `human_promote()` | — (graduates M9 pilot) | M13 · **not offline-verifiable** |
+
+### Production-readiness track (P0–P2)
+
+Five gaps between "architecturally sound POC" and "system a bank can run". The
+*design* is already production-grade; this is hardening, not redesign.
+
+| Phase | Items | When | Rough estimate |
+|---|---|---|---|
+| **P0** — before real customer data | **P0.1** durable execution (wire `ContinuumGraph` + Postgres checkpointer as the live path, retire in-memory `_RUNS`) · **P0.2** sandbox hardening (real ACA sessions, no local-exec fallback) · **P0.3** auth + tenant isolation (identity, RBAC, per-tenant Neo4j subgraph — "M-Auth") | next | 6–8 sessions |
+| **P1** — before regulated / financial-services | **P1.1** ✅ gate independence (`gate_lint`/`gate_typecheck`/`gate_test`; resolves OQ-3) · **P1.2** OTel → App Insights / Langfuse (real traces, real cost, per-stage latency, stuck-run alerts) · **P1.3** ✅ M12 Compliance Report (claims now true) · **P1.4** D29 Canada-residency resolution | after P0 | 5–7 sessions |
+| **P2** — before scale | **P2.1** M11 Spec Registry · **P2.2** M13 State Machine · **P2.3** Hyperlight graduation (M14, when GA) · **P2.4** concurrency hardening (queue worker, not in-memory dict) | after P1 | 8–10 sessions |
+
+**Track overlap:** the feature milestones land inside the production phases —
+P1.3 = M12, P2.1 = M11, P2.2 = M13, P2.3 = M14.
+
+**Honesty notes carried into the roadmap:**
+- **M13 (shipped)** reconciles the PRD's aspirational "9 stages" (§4.2) into the
+  explicit 15-state machine + policy engine — but it governs as a *verified module*;
+  wiring it as the live *gating* path (replacing `_route()`) lands with **P0.1**.
+- **OQ-3 resolved (P1.1):** the Evidence Stack's layers 1 & 2 now read independent
+  gates (lint+typecheck vs test), so "6 independent signals" is literally true.
+- **M14 / Hyperlight** require `agent_framework` + a real sandbox and are **not
+  offline-verifiable** — they will never carry a passing-badge claim in the
+  zero-credential suite.
+- **P0.3 (auth/tenancy) is the gate for any real-client use** — nothing else
+  matters if one tenant's run can contaminate another's data. **This is the
+  highest-priority remaining work.**
 
 ---
 
@@ -601,6 +779,10 @@ make verify-m7        # mapping fidelity / scope-guard
 make verify-m8        # two-layer repo split / .pdlc/ artifacts
 make verify-m9        # MAF harness pilot (opt-in, graceful fallback)
 make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
+make verify-m11       # spec registry (versioned store · supersession · conformance)
+make verify-m12       # compliance report (8-section audit artifact · JSON + HTML)
+make verify-m13       # 15-state machine (policy engine · G1–G4 gates · return edges)
+make verify-p1        # gate independence (lint/typecheck/test · resolves OQ-3)
 ```
 
 | Script | Checks | Result |
@@ -615,8 +797,21 @@ make verify-m10       # ASSERT / rubric eval (specs for Rules 1–9 + M7 scope)
 | `scripts/verify_m8_repo_split.py` | layer-2 placeholder · pdlc write · evidence.json | 3/3 ✅ |
 | `scripts/verify_m9_maf_pilot.py` | capability gate · opt-in · fallback routing | 6/6 ✅ |
 | `scripts/verify_m10_assert.py` | rule coverage · spec discrimination · 3-valued scope · OTel no-op | 6/6 ✅ |
+| `scripts/verify_m11_spec_registry.py` | spec write · cross-run retrieval · supersession chain · Registry conformance | 4/4 ✅ |
+| `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid 8-section report | 3/3 ✅ |
+| `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · missing-artifact block · G1–G4 gates · return edges | 6/6 ✅ |
+| `scripts/verify_p1_gate_independence.py` | independent lint/typecheck/test gates · Evidence Stack layers 1+2 independent (OQ-3) · backward compat | 6/6 ✅ |
 
-> All 10 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 14 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+
+**Planned (M14) — not yet implemented:**
+
+| Script (planned) | Intended checks | Target |
+|--------|--------|--------|
+| M14 MAF graduation | latency + token cost vs. M9 baseline (**not offline-verifiable**) | measured |
+
+> This is a roadmap target, **not a passing check** — and M14 is not offline-verifiable
+> (it needs `agent_framework` + Hyperlight). Today's offline suite is the 13 rows above.
 
 ---
 
@@ -684,7 +879,8 @@ continuum/
 
 | Document | Description |
 |----------|-------------|
-| [`Continuum-Agentic-SDLC-PRD.md`](./Continuum-Agentic-SDLC-PRD.md) | Full PRD v2.2 — architecture decisions, 9 rules, PEV model, 3-tier permissions, eval harness spec |
+| [`Continuum-PRD-v3.0.md`](./Continuum-PRD-v3.0.md) | **Active PRD v3.0** — M0–M10 delivered baseline + M11–M14 roadmap, artifact-centric reframe, Spine/Frontier framing, SDD alignment |
+| [`Continuum-Agentic-SDLC-PRD.md`](./Continuum-Agentic-SDLC-PRD.md) | PRD v2.2 *(superseded by v3.0)* — original M0–M5 POC spec: 9 rules, PEV model, 3-tier permissions, eval harness spec |
 | [`Continuum-Architecture.mermaid`](./Continuum-Architecture.mermaid) | System architecture diagram — 7 planes |
 | [`Continuum-Research-Report.md`](./Continuum-Research-Report.md) | Research backing — 5 sources: Hyperlight, dynamic workflows, Code as Agent Harness, Princeton HAL, 2026 eval literature |
 | [`CROSS-VALIDATION.md`](./CROSS-VALIDATION.md) | PRD vs implementation gap analysis |
@@ -726,7 +922,7 @@ make evo-promote      # list pending proposals, apply selected
 *Deterministic gates. Hardware-isolated sandboxes. A pipeline that learns.*
 
 [![GitHub](https://img.shields.io/badge/github-KIRTIRAJ4327%2Fcontinuum-181717?style=flat-square&logo=github)](https://github.com/KIRTIRAJ4327/continuum)
-[![PRD](https://img.shields.io/badge/docs-PRD_v2.2-7C3AED?style=flat-square)](./Continuum-Agentic-SDLC-PRD.md)
+[![PRD](https://img.shields.io/badge/docs-PRD_v3.0-7C3AED?style=flat-square)](./Continuum-PRD-v3.0.md)
 [![Research](https://img.shields.io/badge/docs-Research_Report-7C3AED?style=flat-square)](./Continuum-Research-Report.md)
 
 </div>
