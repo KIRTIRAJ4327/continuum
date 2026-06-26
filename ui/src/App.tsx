@@ -10,6 +10,7 @@ import { Returned } from './components/Returned';
 import { EvidenceStack } from './components/EvidenceStack';
 import { MappingFidelity } from './components/MappingFidelity';
 import { RunMetrics } from './components/RunMetrics';
+import { TraceTimeline } from './components/TraceTimeline';
 import { useSSE } from './hooks/useSSE';
 import { listRuns } from './lib/api';
 import type { RunSummary, PendingGate, RunStatus } from './types';
@@ -41,7 +42,7 @@ export default function App() {
   }, [activeRunId]);
 
   // ── SSE for the active run ─────────────────────────────────────────────────
-  const { events, connected, error: sseError } = useSSE(activeRunId);
+  const { events, connected, error: sseError, reconnecting } = useSSE(activeRunId);
 
   const activeRun = useMemo(
     () => runs.find((r) => r.run_id === activeRunId),
@@ -140,7 +141,13 @@ export default function App() {
                   Live
                 </span>
               )}
-              {sseError && <span className="text-[10px] text-red-400">{sseError}</span>}
+              {reconnecting && (
+                <span className="flex items-center gap-1 text-[10px] text-amber-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                  Reconnecting…
+                </span>
+              )}
+              {sseError && !reconnecting && <span className="text-[10px] text-red-400">{sseError}</span>}
 
               {/* Center view toggle */}
               <div className="ml-auto flex gap-1 text-[10px]">
@@ -166,8 +173,10 @@ export default function App() {
 
         {/* Center + right panel row */}
         <div className="flex flex-1 overflow-hidden">
-          {/* ── Center: Spine or AgentGraph ──────────────────────────────── */}
-          <div className="flex-1 overflow-hidden">
+          {/* ── Center: Trace timeline + Spine or AgentGraph ─────────────── */}
+          <div className="flex-1 overflow-hidden flex flex-col">
+            {activeRunId && <TraceTimeline events={events} />}
+            <div className="flex-1 overflow-hidden">
             {activeRunId ? (
               centerView === 'spine' ? (
                 <Spine events={events} onStageClick={handleStageClick} />
@@ -184,6 +193,7 @@ export default function App() {
                 </div>
               </div>
             )}
+            </div>
           </div>
 
           {/* ── Right panel ────────────────────────────────────────────── */}

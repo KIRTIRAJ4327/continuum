@@ -353,6 +353,19 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
         if lv_check is None or lv_check.status == "green":
             sc_passed, sc_output = await gate_scope_conformance(state)
             update_gate_status(state, "scope_conformance", sc_passed, sc_output)
+            # C2: surface the mapping-fidelity result to the cockpit.
+            mf = getattr(state, "mapping_fidelity", None) or {}
+            if run_id:
+                await event_bus.emit(run_id, {
+                    "event_type": "scope_checked",
+                    "agent": "developer",
+                    "run_id": run_id,
+                    "data": {
+                        "exact_match": mf.get("exact_match"),
+                        "extra_in_code": mf.get("extra_in_code", []),
+                        "missing_in_code": mf.get("missing_in_code", []),
+                    },
+                })
             if not sc_passed:
                 # Scope mismatch → blocked (no auto-retry, per M7 spec).
                 await _mark_blocked(state, "scope_conformance", sc_output, run_id)
@@ -385,6 +398,20 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
     # M6: only mark `done` if we didn't get parked in blocked/returned/failed.
     if state.run_status not in _EXPLICIT_STATES:
         state.run_status = "done"
+
+    # C2: assemble + broadcast the 6-layer Evidence Stack so the cockpit shows
+    # the proof-of-merge-readiness without a separate API poll.
+    if run_id:
+        try:
+            layers = build_evidence_stack(state)
+            await event_bus.emit(run_id, {
+                "event_type": "evidence_built",
+                "agent": "pipeline",
+                "run_id": run_id,
+                "data": {"layers": layers},
+            })
+        except Exception as ev_exc:  # noqa: BLE001 — evidence emit must never break a run
+            logger.debug("evidence_built emit failed: %s", ev_exc)
 
     # M8: emit .pdlc/ artifacts to the target repo (Layer 2) if configured.
     target_repo = os.getenv("CONTINUUM_TARGET_REPO", "").strip()

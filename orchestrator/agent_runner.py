@@ -887,6 +887,20 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
                 "data": {"output": (output or "")[:500]},
             })
 
+    async def _sensor_event(sensor: str, passed: bool, detail: str) -> None:
+        # C2: per-sensor result so the UI shows live ruff/mypy/pytest/bandit output
+        # as each individual sensor finishes, not just the composite gate.
+        if ctx.run_id:
+            await event_bus.emit(ctx.run_id, {
+                "event_type": "sensor_result",
+                "agent": role,
+                "data": {
+                    "sensor": sensor,
+                    "status": "pass" if passed else "fail",
+                    "detail": (detail or "")[:300],
+                },
+            })
+
     if role == AgentRole.DEVELOPER.value:
         target = _sandbox_or_local_path(state, ctx)
         # P1.1: run the three independent gates once, record each as its own
@@ -894,6 +908,7 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
         split = await gates.gate_local_verify_split(target)
         for gname, (ok, out) in split.items():
             gates.update_gate_status(state, gname, ok, out)
+            await _sensor_event(gname, ok, out)  # C2
         passed = all(ok for ok, _ in split.values())
         combined = "; ".join(
             f"{name}={'green' if ok else 'red'}" for name, (ok, _) in split.items()
@@ -906,12 +921,14 @@ async def _run_post_gates(role: str, state: ContinuumState, ctx: AgentContext) -
         target = _sandbox_or_local_path(state, ctx)
         passed, output = await gates.gate_sast(target)
         gates.update_gate_status(state, "security_sast", passed, output)
+        await _sensor_event("bandit", passed, output)  # C2
         await _gate_event("security_sast", passed, output)
         logger.info("[GATE] security_sast=%s (%s)", "green" if passed else "red", target)
 
     elif role == AgentRole.ARCHITECT.value and state.contract:
         passed, output = await gates.gate_contract_validate(state.contract)
         gates.update_gate_status(state, "contract_validate", passed, output)
+        await _sensor_event("openapi_contract", passed, output)  # C2
         await _gate_event("contract_validate", passed, output)
         logger.info("[GATE] contract_validate=%s", "green" if passed else "red")
 
@@ -1352,16 +1369,39 @@ async def run_agent(
         )
     )
 
-    # --- Emit agent_complete ---
+    # --- Emit artifact_ready + agent_complete ---
     if run_id:
         from .events import event_bus  # already imported above but kept lazy per usage
+        # C2: a named checkpoint (tier-3 log line) — works on the offline path too,
+        # so the cockpit/LogsPanel is meaningful in demo mode without Azure.
+        milestone = _milestone_message(role, data, state)
+        if milestone:
+            await event_bus.emit(run_id, {
+                "event_type": "agent_milestone",
+                "agent": role,
+                "run_id": run_id,
+                "data": {"message": milestone},
+            })
+        # C2: surface the artifact this agent produced (with a short preview) so
+        # the cockpit can show "what just got made", not only that a stage ended.
+        artifact_keys = _artifact_summary(role, state)
+        if artifact_keys:
+            await event_bus.emit(run_id, {
+                "event_type": "artifact_ready",
+                "agent": role,
+                "run_id": run_id,
+                "data": {
+                    "artifact_type": ", ".join(artifact_keys),
+                    "preview": json.dumps(data, default=str)[:300] if isinstance(data, dict) else "",
+                },
+            })
         await event_bus.emit(run_id, {
             "event_type": "agent_complete",
             "agent": role,
             "run_id": run_id,
             "data": {
                 "duration_s": round(elapsed, 2),
-                "artifact_keys": _artifact_summary(role, state),
+                "artifact_keys": artifact_keys,
             },
         })
 
@@ -1381,3 +1421,31 @@ def _artifact_summary(role: str, state: ContinuumState) -> List[str]:
         AgentRole.EVOLUTION.value: ["proposal"],
     }
     return mapping.get(role, [])
+
+
+def _milestone_message(role: str, data: Any, state: ContinuumState) -> str:
+    """
+    C2: a short human-readable checkpoint per agent for the cockpit LogsPanel.
+    Pure + offline-safe — derived from the artifacts the agent just produced.
+    """
+    try:
+        if role == AgentRole.BSA.value and getattr(state, "story", None):
+            return "Story drafted and grounded on prior episodes"
+        if role == AgentRole.ARCHITECT.value:
+            dag = getattr(state, "dag", None) or {}
+            n = len(dag.get("tasks", [])) if isinstance(dag, dict) else 0
+            return f"Contract + schema produced; DAG has {n} task(s)"
+        if role == AgentRole.PLANNER.value:
+            return "Implementation plan decomposed"
+        if role == AgentRole.DEVELOPER.value:
+            code = getattr(state, "code", None) or {}
+            return f"{len(code)} file(s) generated"
+        if role == AgentRole.SECURITY.value:
+            g = next((x for x in getattr(state, "gates", []) if x.name == "security_sast"), None)
+            return "Security scan clean" if (g and g.status == "green") else "Security scan recorded"
+        if role == AgentRole.MEMORY.value:
+            n = len(getattr(state, "episodes_written", []) or [])
+            return f"{n} episode(s) written to memory"
+    except Exception:  # noqa: BLE001 — a milestone string must never break a run
+        return ""
+    return ""

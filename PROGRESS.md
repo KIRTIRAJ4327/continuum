@@ -16,6 +16,39 @@ Entry format:
 
 ---
 
+## 2026-06-26 — C2: Observability Cockpit — richer event vocabulary + trace timeline + 3-tier logs (C2)
+**Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
+**What:** Makes the backend visible in the UI — agents working, sensors firing, evidence
+assembling — instead of a spinner. Adds nine finer-grained, offline-safe event types to the bus
+vocabulary (`tool_call`, `llm_token`, `agent_thinking`, `agent_milestone`, `artifact_ready`,
+`sensor_result`, `scope_checked`, `evidence_built`, `controlled_hold`), all carrying the C1 `seq`.
+Emitters: `agent_runner._run_post_gates` fires a `sensor_result` per independent sensor
+(ruff/mypy/pytest as `lint`/`typecheck`/`test`, plus `bandit`, `openapi_contract`) with real
+output; `run_agent` emits `agent_milestone` (a human checkpoint, works offline) + `artifact_ready`
+(with preview) per agent; `_execute_pipeline` emits `scope_checked` after the M7 gate and
+`evidence_built` (the 6-layer stack) before `run_complete`. UI: new `TraceTimeline.tsx` (horizontal
+handoff/gate pills in seq order, live node pulses, click for detail); `ActivityStream.tsx` upgraded
+to a 3-tier log (dim reasoning / normal activity / highlighted decisions) with summaries for every
+new event + an always-visible "agent cannot merge/deploy/modify rules" reassurance row; `useSSE`
+`reconnecting` flag surfaced in the header. No new npm deps; Unicode glyphs only.
+**Files:** `orchestrator/events.py` (vocab doc), `orchestrator/agent_runner.py` (sensor_result /
+milestone / artifact_ready + `_milestone_message`), `api/main.py` (scope_checked, evidence_built),
+`ui/src/types.ts` (EventType + SensorResult/ToolCall/TraceStep), `ui/src/components/ActivityStream.tsx`,
+`ui/src/components/TraceTimeline.tsx` (new), `ui/src/App.tsx`, `ui/src/hooks/useSSE.ts`,
+`scripts/verify_c2_observability.py` (new), `Makefile` (verify-c2), `CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core 11/11 ✅ · verify_m0_loop 3/3 ✅ · verify_m3_learning 6/6 ✅
+- verify_m5_evolution 6/6 ✅ · verify_m6_workqueue 6/6 ✅ · verify_m7_scope_guard 2/2 ✅
+- verify_m8_repo_split 3/3 ✅ · verify_m9_maf_pilot 6/6 ✅ · verify_m10_assert 6/6 ✅
+- verify_m11_spec_registry 4/4 ✅ · verify_m12_compliance 3/3 ✅ · verify_m13_state_machine 6/6 ✅
+- verify_p0_durable_execution 4/4 ✅ · verify_c1_correctness 5/5 ✅
+- **verify_c2_observability 3/3 ✅** (C2 events emitted offline; seq 0..n no gaps; payload shapes + 6 evidence layers)
+- evals/ci_gate.py exit 0 ✅ · `cd ui && npm run build` clean (tsc + vite, 212 modules)
+**Notes:** all new events are additive and offline-safe — they only fire when a `run_id` is set, so
+the M0 verifiers (which call without one) are byte-unchanged. `llm_token` is opt-in
+(`CONTINUUM_STREAM_TOKENS`) and not emitted on the offline path. Reused the existing `ActivityStream`
+/ `RunMetrics` rather than adding parallel LogsPanel/RunMetricsBar components.
+
 ## 2026-06-26 — C1: Correctness Sprint — SSE resume, conn pool, idempotent gate, graph resume (C1)
 **Branch:** `claude/previous-session-plan-xpz609`  ·  **Commit:** pending
 **What:** First of the five "competitive readiness" sprints (Complete Solution Plan). Four

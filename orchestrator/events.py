@@ -101,6 +101,18 @@ def _reset_otel_cache() -> None:
 # M6 adds two run-lifecycle events:
 #   run_blocked  — a gate stayed red past max retries; data: {gate_name, error_message}
 #   run_returned — a human rejected a story/design gate; data: {gate, reason}
+# C2 (observability cockpit) adds finer-grained events so the UI can show what
+# the backend is actually doing, not just a spinner. All are offline-safe and
+# carry the per-run `seq` (C1) like every other event:
+#   tool_call       data: {tool_name, args_preview, result_preview, duration_s}
+#   llm_token       data: {token, cumulative_tokens}    (opt-in CONTINUUM_STREAM_TOKENS)
+#   agent_thinking  data: {thought}     — a reasoning step before an action
+#   agent_milestone data: {message}     — a named checkpoint (e.g. "4 files planned")
+#   artifact_ready  data: {artifact_type, preview}
+#   sensor_result   data: {sensor, status, detail}   — one per gate sensor (ruff/mypy/pytest/bandit)
+#   scope_checked   data: {exact_match, extra_in_code, missing_in_code}
+#   evidence_built  data: {layers: [{layer, status, detail}, ...]}
+#   controlled_hold data: {reason, gate, retry_count} — run parked (blocked)
 
 
 class _EventBus:

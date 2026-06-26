@@ -10,7 +10,41 @@ export type EventType =
   | 'run_complete'
   | 'run_blocked'      // M6: gate stayed red past max retries
   | 'run_returned'     // M6: human rejected a story/design gate
-  | 'pdlc_written';   // M8: .pdlc/ artifacts written to target repo
+  | 'pdlc_written'     // M8: .pdlc/ artifacts written to target repo
+  // C2: observability cockpit — finer-grained events
+  | 'tool_call'
+  | 'llm_token'
+  | 'agent_thinking'
+  | 'agent_milestone'
+  | 'artifact_ready'
+  | 'sensor_result'
+  | 'scope_checked'
+  | 'evidence_built'
+  | 'controlled_hold';
+
+// C2: per-sensor result (ruff/mypy/pytest/bandit/openapi_contract)
+export interface SensorResult {
+  sensor: string;
+  status: 'pass' | 'fail';
+  detail: string;
+}
+
+// C2: a single tool invocation by an agent
+export interface ToolCall {
+  tool_name: string;
+  args_preview: string;
+  result_preview: string;
+  duration_s: number;
+}
+
+// C2: a normalised step on the TraceTimeline (one pill per handoff/gate)
+export interface TraceStep {
+  seq: number;
+  event_type: EventType;
+  agent: string;
+  timestamp: number;
+  label: string;
+}
 
 export interface AgentEvent {
   event_type: EventType;
