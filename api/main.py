@@ -21,9 +21,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from orchestrator.agent_runner import AgentContext, run_agent
@@ -35,6 +35,17 @@ from evals.evidence_stack import build_evidence_stack
 from api.compliance import build_compliance_report, render_compliance_html
 from orchestrator.state_machine import derive_lifecycle_state
 from graph_db.run_store import RunStore, _MEMORY as _RUNS
+from auth import (
+    AuthError,
+    DEFAULT_TENANT,
+    Permission,
+    PermissionDenied,
+    Principal,
+    can_access_tenant,
+    require,
+    resolve_principal,
+    visible_runs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +115,60 @@ _STORE: Optional[RunStore] = None
 # present. When None (the offline default), resume re-drives _execute_pipeline().
 _GRAPH: Optional[Any] = None
 _MAX_RETRIES = 3
+
+
+# --------------------------------------------------------------------------- #
+# P0.3: Auth + tenancy — identity, RBAC, and approval capture
+# --------------------------------------------------------------------------- #
+@app.exception_handler(AuthError)
+async def _auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+    return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+
+@app.exception_handler(PermissionDenied)
+async def _perm_denied_handler(request: Request, exc: PermissionDenied) -> JSONResponse:
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc), "permission": exc.permission},
+    )
+
+
+def current_principal(authorization: Optional[str] = Header(default=None)) -> Principal:
+    """
+    FastAPI dependency: resolve the caller's `Principal` from the Authorization
+    header. Offline (auth not configured) this is always the ADMIN `DEV_PRINCIPAL`,
+    so the header-less UI and every offline path are unchanged. Raises `AuthError`
+    (→ 401) when auth is configured and the token is missing/invalid.
+    """
+    return resolve_principal(authorization)
+
+
+def _guard_run_access(state: ContinuumState, principal: Principal) -> None:
+    """Raise PermissionDenied unless `principal` may see this run's tenant."""
+    if not can_access_tenant(principal, getattr(state, "tenant_id", DEFAULT_TENANT)):
+        raise PermissionDenied(
+            f"run belongs to tenant '{getattr(state, 'tenant_id', DEFAULT_TENANT)}'",
+            tenant=getattr(state, "tenant_id", DEFAULT_TENANT),
+        )
+
+
+def _record_approval(
+    state: ContinuumState, gate: str, principal: Principal, approved: bool
+) -> None:
+    """
+    Capture *who* decided a gate and when, onto `state.gate_approvals[gate]`.
+
+    Pure mutation — this is the data the M12 compliance report reads to replace
+    its "approver identity pending auth" null with a real identity.
+    """
+    if not gate:
+        return
+    state.gate_approvals[gate] = {
+        "approved": bool(approved),
+        "approver": principal.user_id,
+        "approver_email": principal.email,
+        "decided_at": time.time(),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +259,8 @@ def _state_to_dict(state: ContinuumState) -> Dict[str, Any]:
         "component": getattr(state, "component", None),
         "spec_superseded": getattr(state, "spec_superseded", None),
         "lifecycle_state": _lifecycle_state(state),
+        "tenant_id": getattr(state, "tenant_id", DEFAULT_TENANT),
+        "gate_approvals": getattr(state, "gate_approvals", {}) or {},
         "started_at": state.started_at,
         "completed_at": state.completed_at,
     }
@@ -455,11 +522,18 @@ async def _execute_pipeline(state: ContinuumState, run_id: str = "") -> None:
 # API routes
 # --------------------------------------------------------------------------- #
 @app.post("/run")
-async def start_run(req: FeatureRequest) -> Dict[str, Any]:
+async def start_run(
+    req: FeatureRequest,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """
     Submit a feature request.  Returns run_id immediately; pipeline runs in
     background.  Connect to GET /events/{run_id} for live progress.
+
+    P0.3: requires the SUBMIT_RUN permission; the run is stamped with the
+    caller's tenant so it is only visible within that tenant.
     """
+    require(principal, Permission.SUBMIT_RUN)
     if not req.request.strip():
         raise HTTPException(status_code=400, detail="request is empty")
 
@@ -469,6 +543,7 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
         run_id=run_id,
         started_at=time.time(),
         business_mappings=req.business_mappings,  # M7: scope-guard input
+        tenant_id=principal.tenant_id,             # P0.3: tenant isolation
     )
     _RUNS[run_id] = state
 
@@ -493,21 +568,36 @@ async def start_run(req: FeatureRequest) -> Dict[str, Any]:
     return {"run_id": run_id, "status": "running"}
 
 
+@app.get("/me")
+async def whoami(principal: Principal = Depends(current_principal)) -> Dict[str, Any]:
+    """P0.3: the resolved caller identity (offline → the ADMIN dev principal)."""
+    return principal.to_dict()
+
+
 @app.get("/runs")
-async def list_runs() -> List[Dict[str, Any]]:
-    """Return all recorded runs, newest first."""
-    runs = sorted(_RUNS.values(), key=lambda s: s.started_at or 0, reverse=True)
+async def list_runs(
+    principal: Principal = Depends(current_principal),
+) -> List[Dict[str, Any]]:
+    """Return runs visible to the caller's tenant, newest first (P0.3)."""
+    require(principal, Permission.VIEW_RUN)
+    scoped = visible_runs(principal, _RUNS)
+    runs = sorted(scoped.values(), key=lambda s: s.started_at or 0, reverse=True)
     return [_run_summary(s) for s in runs]
 
 
 @app.get("/run/{run_id}")
-async def get_run(run_id: str) -> Dict[str, Any]:
+async def get_run(
+    run_id: str,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
+    require(principal, Permission.VIEW_RUN)
     state = _RUNS.get(run_id)
     if state is None and _STORE is not None:
         # P0.1: try to load from Postgres (run started in a previous process)
         state = await _STORE.load(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)  # P0.3: tenant isolation
     return {"run_id": run_id, "status": _classify(state), "state": _state_to_dict(state)}
 
 
@@ -564,11 +654,17 @@ async def stream_events(run_id: str, request: Request) -> StreamingResponse:
 
 
 @app.get("/artifacts/{run_id}/{agent}")
-async def get_artifact(run_id: str, agent: str) -> Dict[str, Any]:
+async def get_artifact(
+    run_id: str,
+    agent: str,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """Return the primary artifact produced by an agent for a given run."""
+    require(principal, Permission.VIEW_RUN)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
 
     artifacts: Dict[str, Any] = {}
     role = agent.lower()
@@ -630,15 +726,25 @@ async def get_spec_chain(component: str) -> Dict[str, Any]:
 
 
 @app.post("/run/{run_id}/resume")
-async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
-    """Resume a run that is paused at a human approval gate."""
+async def resume_run(
+    run_id: str,
+    approved: bool = True,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
+    """
+    Resume a run paused at a human approval gate (P0.3: requires APPROVE_GATE to
+    approve, REJECT_GATE to reject; the deciding identity is recorded).
+    """
+    require(principal, Permission.APPROVE_GATE if approved else Permission.REJECT_GATE)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
     if not state.human_approval_pending:
         raise HTTPException(status_code=400, detail="run is not awaiting human approval")
 
     gate_name = state.approval_gate_name or ""
+    _record_approval(state, gate_name, principal, approved)  # P0.3: who decided
 
     if approved:
         # Set the appropriate approval flag.
@@ -701,7 +807,11 @@ async def resume_run(run_id: str, approved: bool = True) -> Dict[str, Any]:
 
 
 @app.post("/run/{run_id}/reject")
-async def reject_run(run_id: str, body: RejectRequest) -> Dict[str, Any]:
+async def reject_run(
+    run_id: str,
+    body: RejectRequest,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """
     Return a run to its author at a story/design review gate (M6).
 
@@ -709,10 +819,14 @@ async def reject_run(run_id: str, body: RejectRequest) -> Dict[str, Any]:
     flag, and emits `run_returned`. The run rests in `returned` for the operator
     to inspect (the Returned panel) and resubmit — it is not auto-restarted, so
     the status stays stable for the Work Queue.
+
+    P0.3: requires REJECT_GATE; the deciding identity is recorded.
     """
+    require(principal, Permission.REJECT_GATE)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
 
     gate = body.gate or state.approval_gate_name or ""
     if gate == "story_review":
@@ -720,6 +834,7 @@ async def reject_run(run_id: str, body: RejectRequest) -> Dict[str, Any]:
     elif gate == "design_review":
         state.design_approved = False
 
+    _record_approval(state, gate, principal, approved=False)  # P0.3: who returned it
     state.run_status = "returned"
     state.reject_reason = body.reason or None
     state.human_approval_pending = False
@@ -736,19 +851,27 @@ async def reject_run(run_id: str, body: RejectRequest) -> Dict[str, Any]:
 
 
 @app.post("/run/{run_id}/escalate-resolve")
-async def escalate_resolve(run_id: str) -> Dict[str, Any]:
+async def escalate_resolve(
+    run_id: str,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """
     Send a `blocked` run back to implementation (M6).
 
     Resets the blocking gate's retry budget, clears run_status back to
     `running`, and re-drives the developer chain (developer → security → memory)
     in the background — mirroring resume_run()'s local_verify branch.
+
+    P0.3: requires APPROVE_GATE; the deciding identity is recorded.
     """
+    require(principal, Permission.APPROVE_GATE)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
 
     gate_name = state.approval_gate_name or "local_verify"
+    _record_approval(state, gate_name, principal, approved=True)  # P0.3: who unblocked it
     gate = _gate(state, gate_name)
     if gate:
         gate.retry_count = 0
@@ -806,29 +929,44 @@ async def escalate_resolve(run_id: str) -> Dict[str, Any]:
 
 
 @app.get("/runs/{run_id}/evidence")
-async def get_evidence(run_id: str) -> Dict[str, Any]:
+async def get_evidence(
+    run_id: str,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """Return the 6-layer Evidence Stack for a run (M6)."""
+    require(principal, Permission.VIEW_RUN)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
     return {"run_id": run_id, "evidence": build_evidence_stack(state)}
 
 
 @app.get("/runs/{run_id}/compliance-report")
-async def get_compliance_report(run_id: str) -> Dict[str, Any]:
+async def get_compliance_report(
+    run_id: str,
+    principal: Principal = Depends(current_principal),
+) -> Dict[str, Any]:
     """M12: structured, auditor-readable compliance artifact for a run (JSON)."""
+    require(principal, Permission.VIEW_COMPLIANCE)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
     return build_compliance_report(run_id, state)
 
 
 @app.get("/runs/{run_id}/compliance-report.html", response_class=HTMLResponse)
-async def get_compliance_report_html(run_id: str) -> HTMLResponse:
+async def get_compliance_report_html(
+    run_id: str,
+    principal: Principal = Depends(current_principal),
+) -> HTMLResponse:
     """M12: the same compliance report rendered as a standalone HTML page."""
+    require(principal, Permission.VIEW_COMPLIANCE)
     state = _RUNS.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    _guard_run_access(state, principal)
     report = build_compliance_report(run_id, state)
     return HTMLResponse(content=render_compliance_html(report))
 

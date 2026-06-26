@@ -84,9 +84,13 @@ async def main() -> int:
         rejected = ContinuumState(request=_REQUEST, run_id="verify-m6-reject")
         rejected.story_approved = True
         api_main._RUNS["verify-m6-reject"] = rejected
+        # P0.3: reject_run now requires an authenticated principal with
+        # REJECT_GATE; pass the ADMIN DEV_PRINCIPAL (the offline identity).
+        from auth import DEV_PRINCIPAL
         await reject_run(
             "verify-m6-reject",
             RejectRequest(gate="story_review", reason="Acceptance criteria too vague"),
+            principal=DEV_PRINCIPAL,
         )
         _check(
             "reject sets run_status='returned' + reason + clears approval",

@@ -1,4 +1,4 @@
-.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-p0 verify-p0-auth verify-p02 verify-p1 verify-c1 verify-c2 verify-p03 verify-c3 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
+.PHONY: help install install-ui verify verify-offline verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-p0 verify-p0-auth verify-p02 verify-p1 verify-c1 verify-c2 verify-c3 eval-baseline eval-ci eval-report evo-observe evo-propose evo-promote run run-dev ui-dev ui-build test clean services services-down services-logs check-env
 
 help:
 	@echo "Continuum — Agentic SDLC Pipeline"
@@ -24,6 +24,7 @@ help:
 	@echo "  make verify-m12     — Run M12 Compliance Report demo (3/3)"
 	@echo "  make verify-m13     — Run M13 15-State Machine demo (6/6)"
 	@echo "  make verify-p0      — Run P0.1 Durable Execution demo (4/4)
+  make verify-p0-auth — Run P0.3 Auth + Tenancy demo (6/6)
   make verify-p1      — Run P1.1 Gate Independence demo (6/6)"
 	@echo "  make evo-observe    — Print current failure patterns from event history"
 	@echo "  make evo-propose    — Generate + eval a proposal, write to pending/"
@@ -149,10 +150,6 @@ verify-c1:
 verify-c2:
 	@echo "Running C2 Observability verification (3/3)..."
 	python scripts/verify_c2_observability.py
-
-verify-p03:
-	@echo "Running P0.3 Auth + Tenancy verification (5/5)..."
-	python scripts/verify_p03_auth.py
 
 verify-c3:
 	@echo "Running C3 Extensibility verification (3/3)..."

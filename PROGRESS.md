@@ -111,6 +111,40 @@ ACABox → HyperlightBox implement the same 5-method interface (`write/exec/diff
 local-exec fallback in production) is a P0.2 follow-up requiring Hyper-V / ACA dynamic sessions.
 `CONTINUUM_TARGET_REPO` or `ctx.repo_path` still used as fallback when BoxLite is unavailable.
 
+## 2026-06-17 — P0.3: Auth + Tenancy — identity, RBAC, multi-tenant isolation (P0.3)
+**Branch:** `feature/p0-auth-tenancy` (stacked on `feature/p0-durable-execution`)  ·  **Commit:** pending
+**What:** New `auth/` leaf package — `identity.py` (`Principal` + `resolve_principal`),
+`rbac.py` (`Role` {dev/reviewer/admin} + `Permission` + matrix + `can`/`require`),
+`tenancy.py` (`tenant_key` + `visible_runs` + `can_access_tenant`). Every API route now
+resolves a `Principal` (`current_principal` dependency), `require()`s the right permission
+(SUBMIT_RUN / APPROVE_GATE / REJECT_GATE / VIEW_RUN / VIEW_COMPLIANCE), stamps
+`state.tenant_id`, scopes `GET /runs` to the caller's tenant, guards single-run access by
+tenant, and records *who* decided each gate onto `state.gate_approvals` via
+`_record_approval`. This **closes M12's approver-identity null**: `_section_gate_decisions`
+now shows the real approver when captured, and keeps the explicit null + reason otherwise.
+`AuthError`→401, `PermissionDenied`→403. `GET /me` returns the resolved principal.
+**Offline-safe:** `CONTINUUM_AUTH` unset → ADMIN `DEV_PRINCIPAL` in the `default` tenant, so
+the verify suite, header-less UI, and M11 component keys (`tenant_key` default→bare) are
+byte-unchanged.
+**Files:** `auth/{__init__,errors,identity,rbac,tenancy}.py` (new), `orchestrator/state.py`
+(`tenant_id` + `gate_approvals`), `graph_db/run_store.py` (serialize/deserialize the new
+fields), `api/main.py` (RBAC + tenancy wiring, exception handlers, `_record_approval`, `/me`),
+`api/compliance.py` (approver identity from `gate_approvals`), `scripts/verify_p0_3_auth.py`
+(new), `scripts/verify_m6_workqueue.py` (pass `DEV_PRINCIPAL` to `reject_run`), `Makefile`,
+`CLAUDE.md`, `PROGRESS.md`.
+**Verification:**
+- verify_agent_core 11/11 ✅ · verify_m0_loop 3/3 ✅ · verify_m3 6/6 ✅ · verify_m5 OK ✅
+- verify_m6 6/6 ✅ (updated to pass a principal) · verify_m7 2/2 ✅ · verify_m8 3/3 ✅
+- verify_m9 6/6 ✅ · verify_m10 6/6 ✅ · verify_m11 4/4 ✅ · verify_m12 3/3 ✅ · verify_m13 6/6 ✅
+- verify_p0 (durable) 4/4 ✅ · **verify_p0_3_auth 6/6 ✅** · verify_p1 6/6 ✅
+- evals/ci_gate.py exit 0 ✅
+- Endpoint-level smoke (direct calls): dev cannot APPROVE_GATE → 403; acme dev cannot read
+  beta run → 403; admin approve records identity.
+**Notes:** Live follow-ups — real JWT / Azure AD (Entra ID) validation behind
+`resolve_principal`; per-tenant Neo4j subgraph isolation in the live driver (offline
+`tenant_key` keying is in place). FastAPI route functions carry `Depends(current_principal)`,
+so direct (non-HTTP) callers in verifiers must pass `principal=DEV_PRINCIPAL`.
+
 ## 2026-06-17 — P0.1: Durable Execution — run persistence layer (P0.1)
 **Branch:** `feature/p0-durable-execution`  ·  **Commit:** pending
 **What:** Adds `graph_db/run_store.py` `RunStore` — a two-tier persistence layer for

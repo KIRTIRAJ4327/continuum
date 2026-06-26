@@ -40,8 +40,10 @@
 [![Compliance Tests](https://img.shields.io/badge/Compliance_Tests-3%2F3_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![State Machine Tests](https://img.shields.io/badge/StateMachine_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
 [![Gate Independence Tests](https://img.shields.io/badge/GateIndependence_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
-[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_+_P1.1-7C3AED?style=flat-square)]()
-[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0-64748B?style=flat-square)](#-roadmap)
+[![Durable Execution Tests](https://img.shields.io/badge/DurableExec_Tests-4%2F4_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Auth + Tenancy Tests](https://img.shields.io/badge/Auth_Tenancy_Tests-6%2F6_PASS-22C55E?style=flat-square&logo=pytest&logoColor=white)]()
+[![Milestones](https://img.shields.io/badge/Milestones-M0--M13_+_P0.1_P0.3_P1.1-7C3AED?style=flat-square)]()
+[![Roadmap](https://img.shields.io/badge/Roadmap-M14_+_P0.2_P1.2-64748B?style=flat-square)](#-roadmap)
 
 </div>
 
@@ -603,6 +605,46 @@ Proven offline in `scripts/verify_p1_gate_independence.py` → 6/6 PASS.
 
 ---
 
+## ✅ Durable Execution (P0.1)
+
+Runs survive a process restart. `graph_db/run_store.py` `RunStore` is a two-tier
+persistence layer: **Postgres** (asyncpg) when `POSTGRES_DSN` is set — upserting a
+checkpoint at every human-gate suspension and at completion, reloading non-terminal
+runs on startup (`restore_active()`) — and the in-memory `_MEMORY` dict otherwise.
+`api/main._RUNS` is an **alias** of `_MEMORY` (same object, no copy), so the offline
+verify suite is byte-unchanged. Any Postgres failure degrades silently to in-memory.
+Also fixes `ContinuumGraph._run_agent()` to build a per-run `AgentContext`
+(concurrent-run-safe). Proven offline in `scripts/verify_p0_durable_execution.py` → 4/4 PASS.
+
+---
+
+## ✅ Auth + Tenancy (P0.3)
+
+Identity, RBAC, and multi-tenant isolation — the gate for real-client use. The `auth/`
+leaf package (no imports from `orchestrator`/`api`/`graph_db`):
+
+```
+identity.py   Principal · resolve_principal(token)         offline → ADMIN DEV_PRINCIPAL
+rbac.py       Role {dev,reviewer,admin} · Permission · can()/require()
+tenancy.py    tenant_key() · visible_runs() · can_access_tenant()
+```
+
+- **RBAC on every route** — `require(principal, Permission.…)`: DEV submits runs,
+  REVIEWER approves/rejects gates + reads compliance, ADMIN does everything.
+- **Tenant isolation** — runs are stamped with the caller's `tenant_id`; `GET /runs`
+  is scoped via `visible_runs`, single-run access is tenant-guarded, ADMIN sees all.
+  `tenant_key()` returns the **bare key** for the `default` tenant (M11 keys unchanged).
+- **Who approved** — `state.gate_approvals` records `{approver, email, decided_at}` per
+  gate, which **closes M12's approver-identity null** in the compliance report.
+- **Offline-safe** — `CONTINUUM_AUTH` unset → every caller is the ADMIN `DEV_PRINCIPAL`
+  in the `default` tenant, so the header-less UI and verify suite are byte-unchanged.
+  Dev tokens (`cc.<base64url(json)>`) exercise the logic offline; real JWT / Azure AD
+  (Entra ID) validation plugs in behind `resolve_principal` (live follow-up).
+
+Proven offline in `scripts/verify_p0_3_auth.py` → 6/6 PASS.
+
+---
+
 ## 🏆 Milestone Timeline
 
 ```
@@ -682,7 +724,7 @@ Five gaps between "architecturally sound POC" and "system a bank can run". The
 
 | Phase | Items | When | Rough estimate |
 |---|---|---|---|
-| **P0** — before real customer data | **P0.1** durable execution (wire `ContinuumGraph` + Postgres checkpointer as the live path, retire in-memory `_RUNS`) · **P0.2** sandbox hardening (real ACA sessions, no local-exec fallback) · **P0.3** auth + tenant isolation (identity, RBAC, per-tenant Neo4j subgraph — "M-Auth") | next | 6–8 sessions |
+| **P0** — before real customer data | **P0.1** ✅ durable execution (`RunStore` — Postgres-backed checkpoints + restore, in-memory fallback) · **P0.2** sandbox hardening (real ACA sessions, no local-exec fallback) · **P0.3** ✅ auth + tenant isolation (identity, RBAC, tenant scoping, approver capture — "M-Auth"; live JWT/Azure AD + Neo4j subgraph isolation remain) | **P0.2 next** | ~3 sessions left |
 | **P1** — before regulated / financial-services | **P1.1** ✅ gate independence (`gate_lint`/`gate_typecheck`/`gate_test`; resolves OQ-3) · **P1.2** OTel → App Insights / Langfuse (real traces, real cost, per-stage latency, stuck-run alerts) · **P1.3** ✅ M12 Compliance Report (claims now true) · **P1.4** D29 Canada-residency resolution | after P0 | 5–7 sessions |
 | **P2** — before scale | **P2.1** M11 Spec Registry · **P2.2** M13 State Machine · **P2.3** Hyperlight graduation (M14, when GA) · **P2.4** concurrency hardening (queue worker, not in-memory dict) | after P1 | 8–10 sessions |
 
@@ -801,8 +843,10 @@ make verify-p1        # gate independence (lint/typecheck/test · resolves OQ-3)
 | `scripts/verify_m12_compliance.py` | complete / blocked / returned run each produce a valid 8-section report | 3/3 ✅ |
 | `scripts/verify_m13_state_machine.py` | 15-state traversal · invalid-transition block · missing-artifact block · G1–G4 gates · return edges | 6/6 ✅ |
 | `scripts/verify_p1_gate_independence.py` | independent lint/typecheck/test gates · Evidence Stack layers 1+2 independent (OQ-3) · backward compat | 6/6 ✅ |
+| `scripts/verify_p0_durable_execution.py` | serialize round-trip · RunStore offline save/load/list · graph offline-safe · pipeline state persisted | 4/4 ✅ |
+| `scripts/verify_p0_3_auth.py` | offline ADMIN default · RBAC matrix + `require()` · dev-token + 401 · tenant isolation · approver→M12 · pipeline unchanged | 6/6 ✅ |
 
-> All 14 suites pass with **zero external credentials** — Azure, Neo4j, ADO, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
+> All 16 suites pass with **zero external credentials** — Azure, Neo4j, ADO, Postgres, the MAF framework, and OpenTelemetry are optional. Missing credentials/packages activate the deterministic offline path automatically.
 
 **Planned (M14) — not yet implemented:**
 
@@ -811,7 +855,7 @@ make verify-p1        # gate independence (lint/typecheck/test · resolves OQ-3)
 | M14 MAF graduation | latency + token cost vs. M9 baseline (**not offline-verifiable**) | measured |
 
 > This is a roadmap target, **not a passing check** — and M14 is not offline-verifiable
-> (it needs `agent_framework` + Hyperlight). Today's offline suite is the 13 rows above.
+> (it needs `agent_framework` + Hyperlight). Today's offline suite is the 16 rows above.
 
 ---
 

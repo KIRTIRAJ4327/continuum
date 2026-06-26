@@ -131,16 +131,26 @@ def _section_business_mappings(state: Any) -> Dict[str, Any]:
 
 
 def _section_gate_decisions(state: Any) -> Dict[str, Any]:
-    # Human approval gates (G1/G2 in the named-gate model). Identity is not yet
-    # captured — that lands with auth (P0.3) — so `approver` is an explicit null.
+    # Human approval gates (G1/G2 in the named-gate model). P0.3: when an
+    # authenticated principal decided the gate, `state.gate_approvals[name]`
+    # carries the identity + timestamp and we surface it; otherwise `approver`
+    # stays an explicit null with a reason (offline / pre-auth runs unchanged).
+    approvals = getattr(state, "gate_approvals", {}) or {}
+
     def _human(name: str, approved: bool) -> Dict[str, Any]:
+        rec = approvals.get(name) or {}
+        approver = rec.get("approver")
         d: Dict[str, Any] = {
             "gate": name,
             "approved": bool(approved),
-            "approver": None,
-            "decided_at": None,
+            "approver": approver,
+            "approver_email": rec.get("approver_email") or None,
+            "decided_at": rec.get("decided_at"),
         }
-        d["_missing_reason"] = "approver identity + timestamp not captured (pending auth, P0.3)"
+        if not approver:
+            d["_missing_reason"] = (
+                "approver identity not captured (auth not configured for this run, P0.3)"
+            )
         return d
 
     human_gates = [
